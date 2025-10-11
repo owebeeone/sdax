@@ -2,7 +2,7 @@
 name = "sdax"
 version = "0.1.0"
 description = "A lightweight, high-performance, in-process micro-orchestrator for structured, declarative, and parallel asynchronous tasks in Python."
-authors = [{ name = "Your Name", email = "your@email.com" }]
+authors = [{ name = "Gianni Mariani", email = "gianni@mariani.ws" }]
 readme = "README.md"
 license = { text = "MIT" }
 classifiers = [
