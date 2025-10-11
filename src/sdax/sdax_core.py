@@ -43,6 +43,7 @@ class _LevelManager:
         self.active_tasks: List[AsyncTask] = []
         self.started_tasks: List[AsyncTask] = []  # Tasks that started pre_execute
         self.pre_execute_exception: BaseException | None = None
+        self.post_execute_exceptions: List[BaseException] = []  # Exceptions from post_execute
 
     async def __aenter__(self) -> List[AsyncTask]:
         """Runs pre_execute for tasks that have it, and considers tasks
@@ -91,6 +92,9 @@ class _LevelManager:
 
         This ensures cleanup happens even if pre_execute was cancelled or failed,
         which is critical for resource management (releasing locks, closing files, etc).
+
+        Uses isolated TaskGroups per task to ensure one post_execute exception
+        doesn't cancel other cleanup tasks (preventing resource leaks).
         """
         # Run post_execute for ALL tasks that started pre_execute
         tasks_to_cleanup = self.started_tasks
@@ -103,11 +107,35 @@ class _LevelManager:
         if not tasks_to_cleanup:
             return
 
-        async with asyncio.TaskGroup() as tg:
-            for task in tasks_to_cleanup:
-                if task.post_execute:
-                    phase_name = "post_execute"
-                    tg.create_task(self.processor._execute_phase(task, phase_name))
+        # Helper to run post_execute with exception isolation
+        async def _run_post_isolated(task: AsyncTask):
+            """Run post_execute in its own TaskGroup for structured concurrency.
+
+            This ensures child tasks are properly managed while preventing
+            exceptions from cancelling sibling post_execute tasks.
+            """
+            if not task.post_execute:
+                return None
+
+            exception_caught = None
+            try:
+                # Each post_execute gets its own TaskGroup for child task management
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(self.processor._execute_phase(task, "post_execute"))
+            except* Exception as eg:
+                # Capture exception but don't propagate
+                exception_caught = eg
+
+            return exception_caught
+
+        # Run all post_execute in parallel using gather (no cancellation on exception)
+        post_tasks = [_run_post_isolated(task) for task in tasks_to_cleanup]
+        results = await asyncio.gather(*post_tasks, return_exceptions=True)
+
+        # Collect exceptions from post_execute
+        for result in results:
+            if result is not None and isinstance(result, BaseException):
+                self.post_execute_exceptions.append(result)
 
 
 @dataclass
@@ -177,10 +205,14 @@ class AsyncTaskProcessor:
             except* Exception as eg:
                 execute_exception = eg
 
-        # Collect all exceptions from pre_execute and execute phases
+        # Collect all exceptions from pre_execute, execute, and post_execute phases
         exceptions = [lm.pre_execute_exception for lm in level_managers if lm.pre_execute_exception]
         if execute_exception:
             exceptions.append(execute_exception)
+
+        # Collect all post_execute exceptions from all levels
+        for lm in level_managers:
+            exceptions.extend(lm.post_execute_exceptions)
 
         if exceptions:
             # Raise all collected exceptions as a group
