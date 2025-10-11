@@ -1,10 +1,11 @@
 [project]
 name = "sdax"
-version = "0.1.0"
+version = "0.1.1"
 description = "A lightweight, high-performance, in-process micro-orchestrator for structured, declarative, and parallel asynchronous tasks in Python."
-authors = [{ name = "Gianni Mariani", email = "gianni@mariani.ws" }]
+authors = [
+    { name = "Gianni Mariani", email = "gianni@mariani.ws" },
+]
 readme = "README.md"
-license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -15,6 +16,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.11"
+
+[project.license]
+text = "MIT"
 
 [project.urls]
 Homepage = "https://github.com/owebeeone/sdax"
@@ -27,7 +31,9 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = [
+    "hatchling",
+]
 build-backend = "hatchling.build"
 
 [tool.ruff]
@@ -35,10 +41,14 @@ line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+]
 
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
-
