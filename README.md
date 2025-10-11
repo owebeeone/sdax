@@ -20,7 +20,7 @@ It is ideal for building the internal logic of a single, fast operation, such as
 - **Tiered Parallel Execution**: Tasks are grouped into integer "levels." All tasks at a given level are executed in parallel, and the framework ensures all tasks at level `N` complete successfully before level `N+1` begins.
 - **Guaranteed Cleanup**: `post-execute` runs for **any task whose `pre-execute` was started**, regardless of whether it succeeded, failed, or was cancelled. This ensures resources are always released.
 - **Declarative & Flexible**: Define tasks as simple data classes. Methods for each phase are optional, and each can have its own timeout and retry configuration.
-- **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, with only ~7µs overhead per task.
+- **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, with minimal overhead (see Performance section for details).
 
 ## Installation
 
@@ -173,13 +173,19 @@ Each task can define up to 3 optional phases:
 
 ## Performance
 
-**Benchmarks** (single-threaded Python 3.13, zero-work tasks):
-- **Multi-level execution**: ~137,000 tasks/second (79% of raw asyncio)
-- **Framework overhead**: ~7µs per task
-- **Single large level**: ~21,500 tasks/second
-- **Scalability**: Tested with 1,000+ tasks across 100 levels
+**Benchmarks** (single-threaded, zero-work tasks):
 
-**Real-world performance**: For typical I/O-bound tasks (10ms+), framework overhead is <0.1% and negligible.
+| Python Version | Multi-level | Single Large Level | Framework Overhead |
+|----------------|-------------|--------------------|--------------------|
+| **Python 3.13** | ~137,000 tasks/sec | ~21,500 tasks/sec | ~7µs per task |
+| **Python 3.11** | ~15,000 tasks/sec | ~159 tasks/sec | ~67µs per task |
+
+*Python 3.13 has significantly improved asyncio performance compared to 3.11. Benchmarks show 9x better throughput in many scenarios.*
+
+**Key Observations**:
+- **Multi-level execution**: ~79% of raw asyncio performance (Python 3.13)
+- **Scalability**: Tested with 1,000+ tasks across 100 levels
+- **Real-world performance**: For typical I/O-bound tasks (10ms+), framework overhead is <0.1% and negligible
 
 **When to use**:
 - ✅ I/O-bound workflows (database, HTTP, file operations)
