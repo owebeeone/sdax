@@ -1,8 +1,18 @@
 # sdax - Structured Declarative Async eXecution
 
+[![PyPI version](https://badge.fury.io/py/sdax.svg)](https://pypi.org/project/sdax/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub](https://img.shields.io/badge/github-sdax-blue.svg)](https://github.com/owebeeone/sdax)
+
 `sdax` is a lightweight, high-performance, in-process micro-orchestrator for Python's `asyncio`. It is designed to manage complex, tiered, parallel asynchronous tasks with a declarative API, guaranteeing a correct and predictable order of execution.
 
 It is ideal for building the internal logic of a single, fast operation, such as a complex API endpoint, where multiple dependent I/O calls (to databases, feature flags, or other services) must be reliably initialized, executed, and torn down.
+
+**Links:**
+- 📦 [PyPI Package](https://pypi.org/project/sdax/)
+- 💻 [GitHub Repository](https://github.com/owebeeone/sdax)
+- 🐛 [Issue Tracker](https://github.com/owebeeone/sdax/issues)
 
 ## Key Features
 

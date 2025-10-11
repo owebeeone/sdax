@@ -17,8 +17,8 @@ classifiers = [
 requires-python = ">=3.11"
 
 [project.urls]
-Homepage = "https://github.com/your_username/sdax"
-Issues = "https://github.com/your_username/sdax/issues"
+Homepage = "https://github.com/owebeeone/sdax"
+Issues = "https://github.com/owebeeone/sdax/issues"
 
 [project.optional-dependencies]
 dev = [
