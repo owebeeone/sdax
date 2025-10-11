@@ -10,7 +10,7 @@ It is ideal for building the internal logic of a single, fast operation, such as
 - **Tiered Parallel Execution**: Tasks are grouped into integer "levels." All tasks at a given level are executed in parallel, and the framework ensures all tasks at level `N` complete successfully before level `N+1` begins.
 - **Guaranteed Cleanup**: `post-execute` runs for **any task whose `pre-execute` was started**, regardless of whether it succeeded, failed, or was cancelled. This ensures resources are always released.
 - **Declarative & Flexible**: Define tasks as simple data classes. Methods for each phase are optional, and each can have its own timeout and retry configuration.
-- **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, ensuring ~1ms overhead per task.
+- **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, with only ~7µs overhead per task.
 
 ## Installation
 
@@ -163,20 +163,25 @@ Each task can define up to 3 optional phases:
 
 ## Performance
 
-**Benchmarks** (single-threaded Python 3.13, minimal task work):
-- **Throughput**: ~850-950 tasks/second
-- **Overhead**: ~1ms per task
-- **Scalability**: Handles 1,000+ tasks with consistent performance
+**Benchmarks** (single-threaded Python 3.13, zero-work tasks):
+- **Multi-level execution**: ~137,000 tasks/second (79% of raw asyncio)
+- **Framework overhead**: ~7µs per task
+- **Single large level**: ~21,500 tasks/second
+- **Scalability**: Tested with 1,000+ tasks across 100 levels
+
+**Real-world performance**: For typical I/O-bound tasks (10ms+), framework overhead is <0.1% and negligible.
 
 **When to use**:
 - ✅ I/O-bound workflows (database, HTTP, file operations)
 - ✅ Complex multi-step operations with dependencies
-- ✅ Tasks that take >10ms (framework overhead < 10%)
+- ✅ Multiple levels with reasonable task counts (5-50 tasks/level)
+- ✅ Tasks where guaranteed cleanup is critical
 
 **When NOT to use**:
 - ❌ CPU-bound work (use `ProcessPoolExecutor` instead)
-- ❌ Micro-tasks that complete in <1ms
+- ❌ Single level with 100+ parallel tasks (use raw `asyncio.TaskGroup`)
 - ❌ Simple linear async/await (unnecessary overhead)
+- ❌ Ultra high-frequency operations (>100k ops/sec needed)
 
 ## Use Cases
 
@@ -290,7 +295,8 @@ python tests/test_monte_carlo.py -v
 |---------|------|--------|---------|-------------|
 | Setup complexity | Minimal | High | Very High | None |
 | External dependencies | None | Redis/RabbitMQ | PostgreSQL/MySQL | None |
-| Throughput | ~900 tasks/sec | ~500 tasks/sec | ~50 tasks/sec | 10,000+ ops/sec |
+| Throughput | ~137k tasks/sec | ~500 tasks/sec | ~50 tasks/sec | ~174k ops/sec |
+| Overhead | ~7µs/task | Varies | High | Minimal |
 | Use case | In-process workflows | Distributed tasks | Complex DAGs | Simple async |
 | Guaranteed cleanup | ✅ Yes | ❌ No | ❌ No | Manual |
 | Level-based execution | ✅ Yes | ❌ No | ✅ Yes | Manual |
