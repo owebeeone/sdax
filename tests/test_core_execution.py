@@ -1,0 +1,228 @@
+import asyncio
+import unittest
+from typing import List
+
+from sdax import AsyncTask, AsyncTaskProcessor, TaskContext, TaskFunction
+
+# A shared log to track the order of function calls across tests
+CALL_LOG = []
+
+
+# --- Test Task Functions ---
+async def log_pre(name: str, ctx: TaskContext):
+    await asyncio.sleep(0.01)
+    CALL_LOG.append(f"{name}-pre")
+
+
+async def log_exec(name: str, ctx: TaskContext):
+    await asyncio.sleep(0.01)
+    CALL_LOG.append(f"{name}-exec")
+
+
+async def log_post(name: str, ctx: TaskContext):
+    await asyncio.sleep(0.01)
+    CALL_LOG.append(f"{name}-post")
+
+
+async def fail_pre(name: str, ctx: TaskContext):
+    await asyncio.sleep(0.01)
+    CALL_LOG.append(f"{name}-pre-fail")
+    raise ValueError(f"{name} failed pre-execute")
+
+
+async def fail_exec(name: str, ctx: TaskContext):
+    await asyncio.sleep(0.01)
+    CALL_LOG.append(f"{name}-exec-fail")
+    raise ValueError(f"{name} failed execute")
+
+
+class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        """Clear the call log before each test."""
+        global CALL_LOG
+        CALL_LOG = []
+
+    async def test_successful_multi_level_execution_order(self):
+        """Verify the correct execution order for a successful run."""
+        processor = AsyncTaskProcessor()
+        ctx = TaskContext()
+
+        # Level 1
+        processor.add_task(
+            AsyncTask(
+                "L1A",
+                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+            ),
+            1,
+        )
+        processor.add_task(
+            AsyncTask(
+                "L1B",
+                pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+            ),
+            1,
+        )
+        # Level 2
+        processor.add_task(
+            AsyncTask(
+                "L2A",
+                pre_execute=TaskFunction(lambda c: log_pre("L2A", c)),
+                execute=TaskFunction(lambda c: log_exec("L2A", c)),
+                post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+            ),
+            2,
+        )
+
+        await processor.process_tasks(ctx)
+
+        # Pre-executes happen level by level
+        self.assertIn("L1A-pre", CALL_LOG[0:2])
+        self.assertIn("L1B-pre", CALL_LOG[0:2])
+        self.assertEqual(CALL_LOG[2], "L2A-pre")
+        # Execute happens after all pre-executes
+        self.assertEqual(CALL_LOG[3], "L2A-exec")
+        # Post-executes happen in reverse level order
+        self.assertEqual(CALL_LOG[4], "L2A-post")
+        self.assertIn("L1A-post", CALL_LOG[5:7])
+        self.assertIn("L1B-post", CALL_LOG[5:7])
+
+    async def test_pre_execute_failure_teardown_order(self):
+        """Verify correct teardown when a pre_execute fails."""
+        processor = AsyncTaskProcessor()
+        ctx = TaskContext()
+
+        # Level 1
+        processor.add_task(
+            AsyncTask(
+                "L1A",
+                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+            ),
+            1,
+        )
+        # Level 2
+        processor.add_task(
+            AsyncTask(
+                "L2A",
+                pre_execute=TaskFunction(lambda c: fail_pre("L2A", c)),
+                post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+            ),
+            2,
+        )
+        processor.add_task(
+            AsyncTask(
+                "L2B",
+                pre_execute=TaskFunction(lambda c: log_pre("L2B", c)),
+                post_execute=TaskFunction(lambda c: log_post("L2B", c)),
+            ),
+            2,
+        )
+
+        with self.assertRaises(ExceptionGroup):
+            await processor.process_tasks(ctx)
+
+        # L1A pre-executes successfully
+        self.assertIn("L1A-pre", CALL_LOG)
+        # L2 tasks run in parallel, one fails
+        self.assertIn("L2A-pre-fail", CALL_LOG)
+        self.assertIn("L2B-pre", CALL_LOG)
+        # Execute phase is never reached
+        self.assertNotIn("L2A-exec", CALL_LOG)
+        # Post-execute runs for ALL tasks whose pre-execute started (for cleanup)
+        # This includes L2A even though it failed - critical for resource cleanup
+        self.assertIn("L2A-post", CALL_LOG)
+        self.assertIn("L2B-post", CALL_LOG)
+        self.assertIn("L1A-post", CALL_LOG)
+        # The teardown order is L2 then L1
+        self.assertIn("L2A-post", CALL_LOG[-3:])
+        self.assertIn("L2B-post", CALL_LOG[-3:])
+        self.assertIn("L1A-post", CALL_LOG[-3:])
+
+    async def test_execute_failure_teardown_order(self):
+        """Verify correct teardown when an execute fails."""
+        processor = AsyncTaskProcessor()
+        ctx = TaskContext()
+
+        processor.add_task(
+            AsyncTask(
+                "L1A",
+                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+            ),
+            1,
+        )
+        processor.add_task(
+            AsyncTask(
+                "L1B",
+                pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
+                execute=TaskFunction(lambda c: fail_exec("L1B", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+            ),
+            1,
+        )
+
+        with self.assertRaises(ExceptionGroup):
+            await processor.process_tasks(ctx)
+
+        # All pre-executes should succeed
+        self.assertIn("L1A-pre", CALL_LOG)
+        self.assertIn("L1B-pre", CALL_LOG)
+        # One execute fails
+        self.assertIn("L1B-exec-fail", CALL_LOG)
+        # All successful pre-executes must have their post-executes called
+        self.assertIn("L1A-post", CALL_LOG)
+        self.assertIn("L1B-post", CALL_LOG)
+
+    async def test_tasks_with_missing_functions(self):
+        """Verify tasks with None functions are handled correctly."""
+        processor = AsyncTaskProcessor()
+        ctx = TaskContext()
+
+        # No pre_execute, should still run execute and post
+        processor.add_task(
+            AsyncTask(
+                "L1-NoPre",
+                execute=TaskFunction(lambda c: log_exec("L1-NoPre", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1-NoPre", c)),
+            ),
+            1,
+        )
+        # No execute, should still run pre and post
+        processor.add_task(
+            AsyncTask(
+                "L1-NoExec",
+                pre_execute=TaskFunction(lambda c: log_pre("L1-NoExec", c)),
+                post_execute=TaskFunction(lambda c: log_post("L1-NoExec", c)),
+            ),
+            1,
+        )
+        # Only post_execute, should not run pre or exec
+        processor.add_task(
+            AsyncTask(
+                "L2-PostOnly", post_execute=TaskFunction(lambda c: log_post("L2-PostOnly", c))
+            ),
+            2,
+        )
+
+        await processor.process_tasks(ctx)
+
+        self.assertEqual(
+            set(CALL_LOG),
+            {
+                "L1-NoExec-pre",
+                "L1-NoPre-exec",
+                "L2-PostOnly-post",
+                "L1-NoPre-post",
+                "L1-NoExec-post",
+            },
+        )
+        # Verify L1-NoPre did not run pre-execute
+        self.assertNotIn("L1-NoPre-pre", CALL_LOG)
+        # Verify L1-NoExec did not run execute
+        self.assertNotIn("L1-NoExec-exec", CALL_LOG)
+
+
+if __name__ == "__main__":
+    unittest.main()
