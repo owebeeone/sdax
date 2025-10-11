@@ -36,11 +36,22 @@ async def mc_pre_execute(ctx, level, task_id, fail_chance):
         raise
 
 
-async def mc_post_execute(ctx, level, task_id):
-    """A post-execute function that logs its entry."""
-    await asyncio.sleep(random.uniform(0.001, 0.01))
+async def mc_post_execute(ctx, level, task_id, fail_chance):
+    """A post-execute function that logs its entry and may fail."""
     token = (level, task_id)
-    ctx.data["post_stack"].append(token)
+    
+    try:
+        await asyncio.sleep(random.uniform(0.001, 0.01))
+        ctx.data["post_stack"].append(token)
+        await asyncio.sleep(random.uniform(0.001, 0.01))
+        
+        # Randomly fail during cleanup (this should NOT prevent other cleanup)
+        if random.random() < fail_chance / 2:
+            raise ValueError(f"Task {task_id} at level {level} failed post-execute cleanup.")
+    except asyncio.CancelledError:
+        # Even if cancelled, we should have started
+        # (This shouldn't happen with proper implementation)
+        raise
 
 
 class TestSdaxMonteCarlo(unittest.IsolatedAsyncioTestCase):
@@ -78,7 +89,9 @@ class TestSdaxMonteCarlo(unittest.IsolatedAsyncioTestCase):
                                 )
                             ),
                             post_execute=TaskFunction(
-                                lambda c, l=level, tid=task_id: mc_post_execute(c, l, tid)
+                                lambda c, l=level, tid=task_id: mc_post_execute(
+                                    c, l, tid, FAIL_CHANCE
+                                )
                             ),
                         )
                         processor.add_task(task, level)
@@ -110,9 +123,11 @@ class TestSdaxMonteCarlo(unittest.IsolatedAsyncioTestCase):
                 # 3. Validate Cleanup Symmetry: post_execute is called for all started tasks
                 # The crucial invariant: any task that STARTED pre_execute gets post_execute
                 # called for cleanup, regardless of whether pre_execute succeeded, failed, or was cancelled.
-                self.assertTrue(
-                    set(post_stack).issubset(set(pre_started)),
-                    f"All post_execute tasks must have started pre_execute. "
+                self.assertEqual(
+                    set(post_stack),
+                    set(pre_started),
+                    f"ALL started tasks must have post_execute called. "
+                    f"Missing cleanup: {set(pre_started) - set(post_stack)}, "
                     f"Extra in post: {set(post_stack) - set(pre_started)}"
                 )
 
