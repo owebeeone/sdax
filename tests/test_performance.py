@@ -4,7 +4,6 @@ import unittest
 
 from sdax import AsyncTask, AsyncTaskProcessor, TaskContext, TaskFunction
 
-
 # Minimal sleep to yield thread (0 on modern Python)
 YIELD_TIME = 0
 
@@ -79,9 +78,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         tasks_per_second = TOTAL_TASKS / elapsed
         ms_per_task = (elapsed * 1000) / TOTAL_TASKS
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("Performance Test: Many Levels (Sequential)")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Levels:              {NUM_LEVELS}")
         print(f"  Tasks per level:     {TASKS_PER_LEVEL}")
         print(f"  Total tasks:         {TOTAL_TASKS}")
@@ -89,12 +88,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         print(f"  Elapsed time:        {elapsed:.3f}s")
         print(f"  Throughput:          {tasks_per_second:.0f} tasks/sec")
         print(f"  Time per task:       {ms_per_task:.3f}ms")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         # Basic performance assertion (very generous to account for CI/slow machines)
         # Should be able to process at least 1000 tasks/sec on modern hardware
-        self.assertGreater(tasks_per_second, 100,
-                          f"Performance too slow: {tasks_per_second:.0f} tasks/sec")
+        self.assertGreater(
+            tasks_per_second, 100, f"Performance too slow: {tasks_per_second:.0f} tasks/sec"
+        )
 
     async def test_high_throughput_parallel_heavy(self):
         """
@@ -141,9 +141,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         tasks_per_second = TOTAL_TASKS / elapsed
         ms_per_task = (elapsed * 1000) / TOTAL_TASKS
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("Performance Test: Parallel Heavy")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Levels:              {NUM_LEVELS}")
         print(f"  Tasks per level:     {TASKS_PER_LEVEL}")
         print(f"  Total tasks:         {TOTAL_TASKS}")
@@ -152,11 +152,12 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         print(f"  Throughput:          {tasks_per_second:.0f} tasks/sec")
         print(f"  Time per task:       {ms_per_task:.3f}ms")
         print(f"  Parallel efficiency: {TASKS_PER_LEVEL * NUM_LEVELS * 3 / elapsed:.0f} phases/sec")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         # Basic performance assertion
-        self.assertGreater(tasks_per_second, 100,
-                          f"Performance too slow: {tasks_per_second:.0f} tasks/sec")
+        self.assertGreater(
+            tasks_per_second, 100, f"Performance too slow: {tasks_per_second:.0f} tasks/sec"
+        )
 
     async def test_high_throughput_massive_scale(self):
         """
@@ -204,9 +205,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         ms_per_task = (elapsed * 1000) / TOTAL_TASKS
         total_phases = TOTAL_TASKS * 3
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("Performance Test: Massive Scale")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Levels:              {NUM_LEVELS}")
         print(f"  Tasks per level:     {TASKS_PER_LEVEL}")
         print(f"  Total tasks:         {TOTAL_TASKS}")
@@ -216,11 +217,12 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         print(f"  Phase throughput:    {total_phases / elapsed:.0f} phases/sec")
         print(f"  Time per task:       {ms_per_task:.3f}ms")
         print(f"  Overhead per task:   {ms_per_task:.4f}ms (minimal work)")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         # Basic performance assertion
-        self.assertGreater(tasks_per_second, 100,
-                          f"Performance too slow: {tasks_per_second:.0f} tasks/sec")
+        self.assertGreater(
+            tasks_per_second, 100, f"Performance too slow: {tasks_per_second:.0f} tasks/sec"
+        )
 
     async def test_minimal_overhead_single_level(self):
         """
@@ -239,15 +241,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
             task_id = f"T{task_num}"
             task = AsyncTask(
                 name=task_id,
-                pre_execute=TaskFunction(
-                    lambda c, tid=task_id: perf_pre_execute(c, 1, tid)
-                ),
-                execute=TaskFunction(
-                    lambda c, tid=task_id: perf_execute(c, 1, tid)
-                ),
-                post_execute=TaskFunction(
-                    lambda c, tid=task_id: perf_post_execute(c, 1, tid)
-                ),
+                pre_execute=TaskFunction(lambda c, tid=task_id: perf_pre_execute(c, 1, tid)),
+                execute=TaskFunction(lambda c, tid=task_id: perf_execute(c, 1, tid)),
+                post_execute=TaskFunction(lambda c, tid=task_id: perf_post_execute(c, 1, tid)),
             )
             processor.add_task(task, 1)
 
@@ -264,9 +260,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         tasks_per_second = TOTAL_TASKS / elapsed
         us_per_task = (elapsed * 1_000_000) / TOTAL_TASKS
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("Performance Test: Minimal Overhead (Single Level)")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"  Total tasks:         {TOTAL_TASKS}")
         print("  Level:               1 (all parallel)")
         print(f"  Total phases:        {TOTAL_TASKS * 3} (pre + exec + post)")
@@ -274,13 +270,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         print(f"  Throughput:          {tasks_per_second:.0f} tasks/sec")
         print(f"  Time per task:       {us_per_task:.1f}µs")
         print(f"  Framework overhead:  ~{us_per_task:.1f}µs per task")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         # Basic performance assertion
-        self.assertGreater(tasks_per_second, 500,
-                          f"Performance too slow: {tasks_per_second:.0f} tasks/sec")
+        self.assertGreater(
+            tasks_per_second, 500, f"Performance too slow: {tasks_per_second:.0f} tasks/sec"
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

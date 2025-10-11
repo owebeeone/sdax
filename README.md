@@ -20,7 +20,7 @@ pip install sdax
 
 Or for development:
 ```bash
-git clone https://github.com/your_username/sdax.git
+git clone https://github.com/owebeeone/sdax.git
 cd sdax
 pip install -e .
 ```
@@ -158,7 +158,7 @@ Each task can define up to 3 optional phases:
 | Phase | When It Runs | Purpose | Cleanup Guarantee |
 |-------|-------------|---------|-------------------|
 | `pre_execute` | First, by level | Initialize resources, setup | `post_execute` runs if started |
-| `execute` | After all pre_execute | Do main work | `post_execute` runs if pre_execute succeeded |
+| `execute` | After all pre_execute | Do main work | `post_execute` runs if pre_execute started |
 | `post_execute` | Last, reverse order | Cleanup, release resources | Always runs if pre_execute started |
 
 ## Performance

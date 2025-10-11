@@ -9,34 +9,39 @@ from typing import Awaitable, Callable, Dict, List
 @dataclass
 class TaskContext:
     """A simple data-passing object for tasks to share state."""
+
     def __init__(self):
         self.data: Dict = {}
         self.failed: bool = False
 
+
 @dataclass
 class TaskFunction:
     """Encapsulates a callable with its own execution parameters."""
+
     function: Callable[[TaskContext], Awaitable[None]]
     timeout: float = 2.0
     retries: int = 0
     backoff_factor: float = 2.0
 
+
 @dataclass
 class AsyncTask:
     """A declarative definition of a task with optional pre-execute, execute,
     and post-execute phases, each with its own configuration."""
+
     name: str
     pre_execute: TaskFunction | None = None
     execute: TaskFunction | None = None
     post_execute: TaskFunction | None = None
+
 
 class _LevelManager:
     """An internal context manager to handle the parallel execution of all
     tasks within a single level for both setup and teardown."""
 
     def __init__(
-        self, level: int, tasks: List[AsyncTask],
-        ctx: TaskContext, processor: 'AsyncTaskProcessor'
+        self, level: int, tasks: List[AsyncTask], ctx: TaskContext, processor: "AsyncTaskProcessor"
     ):
         self.level = level
         self.tasks = tasks
@@ -51,7 +56,7 @@ class _LevelManager:
         without it as implicitly successful."""
         # Attach context to all tasks in this level
         for task in self.tasks:
-            setattr(task, '_ctx', self.ctx)
+            setattr(task, "_ctx", self.ctx)
 
         successful_tasks: List[AsyncTask] = []
         tasks_to_run: List[AsyncTask] = []
@@ -90,18 +95,18 @@ class _LevelManager:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Runs post_execute for all tasks whose pre_execute was started.
-        
+
         This ensures cleanup happens even if pre_execute was cancelled or failed,
         which is critical for resource management (releasing locks, closing files, etc).
         """
         # Run post_execute for ALL tasks that started pre_execute
         tasks_to_cleanup = self.started_tasks
-        
+
         # Also include tasks without pre_execute that are in active_tasks
         for task in self.active_tasks:
             if task not in tasks_to_cleanup:
                 tasks_to_cleanup.append(task)
-        
+
         if not tasks_to_cleanup:
             return
 
@@ -109,13 +114,13 @@ class _LevelManager:
             for task in tasks_to_cleanup:
                 if task.post_execute:
                     phase_name = "post_execute"
-                    tg.create_task(
-                        self.processor._execute_phase(task, phase_name)
-                    )
+                    tg.create_task(self.processor._execute_phase(task, phase_name))
+
 
 @dataclass
 class AsyncTaskProcessor:
     """The core engine that processes a collection of tiered async tasks."""
+
     tasks: Dict[int, List[AsyncTask]] = field(default_factory=lambda: defaultdict(list))
 
     def add_task(self, task: AsyncTask, level: int):
@@ -134,12 +139,9 @@ class AsyncTaskProcessor:
         backoff_factor = task_func_obj.backoff_factor
 
         # We need a context attached to the task for the function call
-        ctx = getattr(task, '_ctx', None)
+        ctx = getattr(task, "_ctx", None)
         if not ctx:
-            msg = (
-                f"TaskContext not found on task '{task.name}' "
-                f"during phase '{phase}'"
-            )
+            msg = f"TaskContext not found on task '{task.name}' during phase '{phase}'"
             raise RuntimeError(msg)
 
         for attempt in range(retries + 1):
@@ -157,7 +159,7 @@ class AsyncTaskProcessor:
                 if attempt >= retries:
                     raise
 
-                delay = (backoff_factor ** attempt) + random.uniform(0, 0.5)
+                delay = (backoff_factor**attempt) + random.uniform(0, 0.5)
                 await asyncio.sleep(delay)
 
     async def process_tasks(self, ctx: TaskContext):
@@ -183,10 +185,7 @@ class AsyncTaskProcessor:
                 execute_exception = eg
 
         # Collect all exceptions from pre_execute and execute phases
-        exceptions = [
-            lm.pre_execute_exception for lm in level_managers
-            if lm.pre_execute_exception
-        ]
+        exceptions = [lm.pre_execute_exception for lm in level_managers if lm.pre_execute_exception]
         if execute_exception:
             exceptions.append(execute_exception)
 
@@ -197,4 +196,3 @@ class AsyncTaskProcessor:
             else:
                 msg = "Multiple failures during task execution"
                 raise ExceptionGroup(msg, exceptions)
-
