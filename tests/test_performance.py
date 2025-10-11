@@ -1,8 +1,17 @@
 import asyncio
 import time
 import unittest
+from dataclasses import dataclass, field
+from typing import Dict
 
-from sdax import AsyncTask, AsyncTaskProcessor, TaskContext, TaskFunction
+from sdax import AsyncTask, AsyncTaskProcessor, TaskFunction
+
+
+@dataclass
+class TaskContext:
+    """A simple data-passing object for tasks to share state."""
+    data: Dict = field(default_factory=dict)
+
 
 # Minimal sleep to yield thread (0 on modern Python)
 YIELD_TIME = 0

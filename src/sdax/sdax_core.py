@@ -3,23 +3,16 @@ import random
 from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, List
+from typing import Awaitable, Callable, Dict, List, TypeVar
 
-
-@dataclass
-class TaskContext:
-    """A simple data-passing object for tasks to share state."""
-
-    def __init__(self):
-        self.data: Dict = {}
-        self.failed: bool = False
+T = TypeVar("T")
 
 
 @dataclass
 class TaskFunction:
     """Encapsulates a callable with its own execution parameters."""
 
-    function: Callable[[TaskContext], Awaitable[None]]
+    function: Callable[[T], Awaitable[None]]
     timeout: float = 2.0
     retries: int = 0
     backoff_factor: float = 2.0
@@ -41,7 +34,7 @@ class _LevelManager:
     tasks within a single level for both setup and teardown."""
 
     def __init__(
-        self, level: int, tasks: List[AsyncTask], ctx: TaskContext, processor: "AsyncTaskProcessor"
+        self, level: int, tasks: List[AsyncTask], ctx: T, processor: "AsyncTaskProcessor"
     ):
         self.level = level
         self.tasks = tasks
@@ -162,7 +155,7 @@ class AsyncTaskProcessor:
                 delay = (backoff_factor**attempt) + random.uniform(0, 0.5)
                 await asyncio.sleep(delay)
 
-    async def process_tasks(self, ctx: TaskContext):
+    async def process_tasks(self, ctx: T):
         """The main entry point to run the entire tiered workflow."""
         active_tasks: List[AsyncTask] = []
         level_managers: List[_LevelManager] = []

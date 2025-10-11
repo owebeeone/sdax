@@ -1,8 +1,16 @@
 import asyncio
 import unittest
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List
 
-from sdax import AsyncTask, AsyncTaskProcessor, TaskContext, TaskFunction
+from sdax import AsyncTask, AsyncTaskProcessor, TaskFunction
+
+
+@dataclass
+class TaskContext:
+    """A simple data-passing object for tasks to share state."""
+    data: Dict = field(default_factory=dict)
+
 
 # A shared log to track the order of function calls across tests
 CALL_LOG = []

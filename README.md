@@ -39,24 +39,32 @@ pip install -e .
 
 ```python
 import asyncio
-from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction, TaskContext
+from dataclasses import dataclass
+from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction
 
-# 1. Define your task functions
+# 1. Define your context class with typed fields
+@dataclass
+class TaskContext:
+    user_id: int | None = None
+    feature_flags: dict | None = None
+    db_connection = None
+
+# 2. Define your task functions
 async def check_auth(ctx: TaskContext):
     print("Level 1: Checking authentication...")
     await asyncio.sleep(0.1)
-    ctx.data["user_id"] = 123
+    ctx.user_id = 123
     print("Auth successful.")
 
 async def load_feature_flags(ctx: TaskContext):
     print("Level 1: Loading feature flags...")
     await asyncio.sleep(0.2)
-    ctx.data["flags"] = {"new_api": True}
+    ctx.feature_flags = {"new_api": True}
     print("Flags loaded.")
 
 async def fetch_user_data(ctx: TaskContext):
     print("Level 2: Fetching user data...")
-    if not ctx.data.get("user_id"):
+    if not ctx.user_id:
         raise ValueError("Auth failed, cannot fetch user data.")
     await asyncio.sleep(0.1)
     print("User data fetched.")
@@ -67,11 +75,11 @@ async def close_db_connection(ctx: TaskContext):
     print("Connection closed.")
 
 async def main():
-    # 2. Create a processor and a context
+    # 3. Create a processor and a context
     processor = AsyncTaskProcessor()
     ctx = TaskContext()
 
-    # 3. Declaratively define your workflow
+    # 4. Declaratively define your workflow
     processor.add_task(
         level=1,
         task=AsyncTask(
@@ -118,19 +126,24 @@ This is **by design** for resource management. If your `pre_execute` acquires re
 ### Example: Safe Resource Management
 
 ```python
+@dataclass
+class TaskContext:
+    lock: asyncio.Lock | None = None
+    lock_acquired: bool = False
+
 async def acquire_lock(ctx: TaskContext):
-    ctx.data["lock"] = await some_lock.acquire()
+    ctx.lock = await some_lock.acquire()
     # If cancelled here, lock is acquired but flag not set
-    ctx.data["lock_acquired"] = True
+    ctx.lock_acquired = True
 
 async def release_lock(ctx: TaskContext):
     # ✅ GOOD: Check if we actually acquired the lock
-    if ctx.data.get("lock_acquired"):
-        await ctx.data["lock"].release()
+    if ctx.lock_acquired and ctx.lock:
+        await ctx.lock.release()
     # ✅ GOOD: Or use try/except for safety
     try:
-        if "lock" in ctx.data:
-            await ctx.data["lock"].release()
+        if ctx.lock:
+            await ctx.lock.release()
     except Exception:
         pass  # Already released or never acquired
 ```
@@ -276,14 +289,20 @@ AsyncTask(
 
 ### Shared Context
 
-The `TaskContext` is shared across all tasks and phases:
+You define your own context class with typed fields:
 
 ```python
+@dataclass
+class TaskContext:
+    user_id: int | None = None
+    permissions: list[str] = field(default_factory=list)
+    db_connection: Any = None
+
 async def task_a(ctx: TaskContext):
-    ctx.data["user_id"] = 123  # Set data
+    ctx.user_id = 123  # Set data
 
 async def task_b(ctx: TaskContext):
-    user_id = ctx.data["user_id"]  # Read data from task_a
+    user_id = ctx.user_id  # Read data from task_a, with full type hints!
 ```
 
 **Note**: The context is shared but not thread-safe. Since tasks run in a single asyncio event loop, no locking is needed.

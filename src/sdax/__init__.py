@@ -9,13 +9,11 @@ __version__ = "0.1.0"
 from .sdax_core import (
     AsyncTask,
     AsyncTaskProcessor,
-    TaskContext,
     TaskFunction,
 )
 
 __all__ = [
     "AsyncTask",
     "AsyncTaskProcessor",
-    "TaskContext",
     "TaskFunction",
 ]
