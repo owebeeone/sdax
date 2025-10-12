@@ -15,7 +15,6 @@ class TaskContext:
 class TestSdaxContextPassing(unittest.IsolatedAsyncioTestCase):
     async def test_context_is_shared_and_mutable(self):
         """Verify that all tasks receive the same context and can modify it."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
         async def set_value(context: TaskContext):
@@ -26,8 +25,12 @@ class TestSdaxContextPassing(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
             self.assertTrue(context.data.get("level1_seen"))
 
-        processor.add_task(AsyncTask("Setter", pre_execute=TaskFunction(set_value)), 1)
-        processor.add_task(AsyncTask("Checker", execute=TaskFunction(check_value)), 2)
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(AsyncTask("Setter", pre_execute=TaskFunction(set_value)), 1)
+            .add_task(AsyncTask("Checker", execute=TaskFunction(check_value)), 2)
+            .build()
+        )
 
         await processor.process_tasks(ctx)
 

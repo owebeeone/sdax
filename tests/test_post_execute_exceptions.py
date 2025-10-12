@@ -68,35 +68,36 @@ class TestPostExecuteExceptions(unittest.IsolatedAsyncioTestCase):
         - Task A's post_execute raises exception
         - Tasks B and C's post_execute complete despite A's exception
         """
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Three tasks at level 1, all with pre_execute and post_execute
-        processor.add_task(
-            AsyncTask(
-                name="FailingTask",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(failing_post_A),
-            ),
-            level=1,
-        )
-
-        processor.add_task(
-            AsyncTask(
-                name="CleanupTaskB",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(cleanup_post_B),
-            ),
-            level=1,
-        )
-
-        processor.add_task(
-            AsyncTask(
-                name="CleanupTaskC",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(cleanup_post_C),
-            ),
-            level=1,
+        # Build processor with three tasks at level 1, all with pre_execute and post_execute
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="FailingTask",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(failing_post_A),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="CleanupTaskB",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(cleanup_post_B),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="CleanupTaskC",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(cleanup_post_C),
+                ),
+                level=1,
+            )
+            .build()
         )
 
         # Process should raise exception, but all cleanup should complete
@@ -149,34 +150,35 @@ class TestPostExecuteExceptions(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.015)
             CALL_LOG.append("post_3_completed")
 
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        processor.add_task(
-            AsyncTask(
-                name="Fail1",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(failing_post_1),
-            ),
-            level=1,
-        )
-
-        processor.add_task(
-            AsyncTask(
-                name="Fail2",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(failing_post_2),
-            ),
-            level=1,
-        )
-
-        processor.add_task(
-            AsyncTask(
-                name="Cleanup3",
-                pre_execute=TaskFunction(noop_pre),
-                post_execute=TaskFunction(cleanup_post_3),
-            ),
-            level=1,
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="Fail1",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(failing_post_1),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="Fail2",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(failing_post_2),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="Cleanup3",
+                    pre_execute=TaskFunction(noop_pre),
+                    post_execute=TaskFunction(cleanup_post_3),
+                ),
+                level=1,
+            )
+            .build()
         )
 
         with self.assertRaises(ExceptionGroup):

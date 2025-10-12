@@ -1,6 +1,6 @@
 [project]
 name = "sdax"
-version = "0.2.1"
+version = "0.3.0"
 description = "A lightweight, high-performance, in-process micro-orchestrator for structured, declarative, and parallel asynchronous tasks in Python."
 authors = [
     { name = "Gianni Mariani", email = "gianni@mariani.ws" },
@@ -16,6 +16,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.11"
+dependencies = [
+    "datatrees>=0.3.7",
+    "frozendict>=2.4.6",
+]
 
 [project.license]
 text = "MIT"

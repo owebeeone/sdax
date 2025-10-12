@@ -3,22 +3,25 @@ import random
 from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, List, TypeVar
+from typing import Awaitable, Callable, Dict, Generic, List, TypeVar
+
+from datatrees import datatree, dtfield
+from frozendict import frozendict
 
 T = TypeVar("T")
 
 
-@dataclass
-class TaskFunction:
+@dataclass(frozen=True)
+class TaskFunction(Generic[T]):
     """Encapsulates a callable with its own execution parameters."""
 
     function: Callable[[T], Awaitable[None]]
-    timeout: float = 2.0
+    timeout: float | None = 2.0  # None means no timeout
     retries: int = 0
     backoff_factor: float = 2.0
 
 
-@dataclass
+@dataclass(frozen=True)
 class AsyncTask:
     """A declarative definition of a task with optional pre-execute, execute,
     and post-execute phases, each with its own configuration."""
@@ -27,6 +30,14 @@ class AsyncTask:
     pre_execute: TaskFunction | None = None
     execute: TaskFunction | None = None
     post_execute: TaskFunction | None = None
+
+    def __post_init__(self):
+        """Validate that at least one task phase is defined."""
+        if not any([self.pre_execute, self.execute, self.post_execute]):
+            raise ValueError(
+                f"Task '{self.name}' must have at least one of: "
+                "pre_execute, execute, or post_execute"
+            )
 
 
 @dataclass
@@ -150,13 +161,42 @@ class _LevelManager:
 
 
 @dataclass
-class AsyncTaskProcessor:
-    """The core engine that processes a collection of tiered async tasks."""
+class AsyncTaskProcessorBuilder:
+    """The builder for the core engine that processes a collection of tiered async tasks."""
 
     tasks: Dict[int, List[AsyncTask]] = field(default_factory=lambda: defaultdict(list))
 
-    def add_task(self, task: AsyncTask, level: int):
+    def add_task(self, task: AsyncTask, level: int) -> 'AsyncTaskProcessorBuilder':
+        """Add a task at the specified level. Returns self for fluent chaining."""
         self.tasks[level].append(task)
+        return self
+
+    def build(self) -> 'AsyncTaskProcessor':
+        """Build an immutable AsyncTaskProcessor from the accumulated tasks."""
+        # Convert defaultdict to regular dict and freeze task lists
+        frozen_tasks = {level: tuple(tasks) for level, tasks in self.tasks.items()}
+        return AsyncTaskProcessor(tasks=frozendict(frozen_tasks))
+
+
+@datatree(frozen=True)
+class AsyncTaskProcessor:
+    """Immutable core engine that processes a collection of tiered async tasks.
+
+    This class is frozen and can be safely shared across multiple concurrent
+    executions. Use AsyncTaskProcessorBuilder to construct instances.
+    """
+
+    tasks: frozendict[int, tuple[AsyncTask, ...]]
+
+    # Calculated field: sorted levels for iteration
+    sorted_levels: tuple[int, ...] = dtfield(
+        self_default=lambda self: tuple(sorted(self.tasks.keys()))
+    )
+
+    @staticmethod
+    def builder() -> AsyncTaskProcessorBuilder:
+        """Create a new builder for constructing an immutable processor."""
+        return AsyncTaskProcessorBuilder()
 
     async def _execute_phase(self, task: AsyncTask, phase: str, exec_ctx: _ExecutionContext):
         """A helper method to wrap the execution of a single task phase
@@ -175,16 +215,12 @@ class AsyncTaskProcessor:
 
         for attempt in range(retries + 1):
             try:
-                await asyncio.wait_for(func(ctx), timeout=timeout)
+                if timeout is None:
+                    await func(ctx)
+                else:
+                    await asyncio.wait_for(func(ctx), timeout=timeout)
                 return  # Success
-            except (asyncio.TimeoutError, ConnectionError) as e:
-                # This print is for retry attempts, useful for debugging.
-                # Consider replacing with logging.
-                attempt_info = f"{attempt + 1}/{retries + 1}"
-                print(
-                    f"  - [{task.name}/{phase}] Attempt {attempt_info} "
-                    f"failed: {e.__class__.__name__}"
-                )
+            except (asyncio.TimeoutError, ConnectionError) as _:
                 if attempt >= retries:
                     raise
 
@@ -204,8 +240,7 @@ class AsyncTaskProcessor:
         level_managers: List[_LevelManager] = []
 
         async with AsyncExitStack() as stack:
-            sorted_levels = sorted(self.tasks.keys())
-            for level in sorted_levels:
+            for level in self.sorted_levels:
                 level_manager = _LevelManager(level, self.tasks[level], exec_ctx, self)
                 level_managers.append(level_manager)
                 tasks_from_level = await stack.enter_async_context(level_manager)

@@ -69,13 +69,14 @@ class TestSdaxMonteCarlo(unittest.IsolatedAsyncioTestCase):
 
         for i in range(N_RUNS):
             with self.subTest(run=i):
-                processor = AsyncTaskProcessor()
                 ctx = TaskContext()
                 ctx.data["pre_started"] = []  # Tasks that started pre_execute
                 ctx.data["pre_stack"] = []  # Tasks that completed pre_execute
                 ctx.data["post_stack"] = []  # Tasks that completed post_execute
                 ctx.data["cancelled_stack"] = []  # Tasks that were cancelled
 
+                # Build processor with randomized tasks
+                builder = AsyncTaskProcessor.builder()
                 num_levels = random.randint(1, MAX_LEVELS)
                 for level in range(1, num_levels + 1):
                     num_tasks = random.randint(1, MAX_TASKS_PER_LEVEL)
@@ -94,7 +95,9 @@ class TestSdaxMonteCarlo(unittest.IsolatedAsyncioTestCase):
                                 )
                             ),
                         )
-                        processor.add_task(task, level)
+                        builder.add_task(task, level)
+                
+                processor = builder.build()
 
                 try:
                     await processor.process_tasks(ctx)

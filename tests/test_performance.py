@@ -51,12 +51,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         TASKS_PER_LEVEL = 5
         TOTAL_TASKS = NUM_LEVELS * TASKS_PER_LEVEL
 
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
         ctx.data["pre_count"] = 0
         ctx.data["exec_count"] = 0
         ctx.data["post_count"] = 0
 
+        # Build processor with many levels
+        builder = AsyncTaskProcessor.builder()
         for level in range(1, NUM_LEVELS + 1):
             for task_num in range(TASKS_PER_LEVEL):
                 task_id = f"L{level}-T{task_num}"
@@ -72,7 +73,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
                         lambda c, lvl=level, tid=task_id: perf_post_execute(c, lvl, tid)
                     ),
                 )
-                processor.add_task(task, level)
+                builder.add_task(task, level)
+        
+        processor = builder.build()
 
         start_time = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -114,12 +117,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         TASKS_PER_LEVEL = 50
         TOTAL_TASKS = NUM_LEVELS * TASKS_PER_LEVEL
 
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
         ctx.data["pre_count"] = 0
         ctx.data["exec_count"] = 0
         ctx.data["post_count"] = 0
 
+        # Build processor for parallel-heavy workload
+        builder = AsyncTaskProcessor.builder()
         for level in range(1, NUM_LEVELS + 1):
             for task_num in range(TASKS_PER_LEVEL):
                 task_id = f"L{level}-T{task_num}"
@@ -135,7 +139,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
                         lambda c, lvl=level, tid=task_id: perf_post_execute(c, lvl, tid)
                     ),
                 )
-                processor.add_task(task, level)
+                builder.add_task(task, level)
+        
+        processor = builder.build()
 
         start_time = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -177,12 +183,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         TASKS_PER_LEVEL = 20
         TOTAL_TASKS = NUM_LEVELS * TASKS_PER_LEVEL
 
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
         ctx.data["pre_count"] = 0
         ctx.data["exec_count"] = 0
         ctx.data["post_count"] = 0
 
+        # Build processor for massive scale workload
+        builder = AsyncTaskProcessor.builder()
         for level in range(1, NUM_LEVELS + 1):
             for task_num in range(TASKS_PER_LEVEL):
                 task_id = f"L{level}-T{task_num}"
@@ -198,7 +205,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
                         lambda c, lvl=level, tid=task_id: perf_post_execute(c, lvl, tid)
                     ),
                 )
-                processor.add_task(task, level)
+                builder.add_task(task, level)
+        
+        processor = builder.build()
 
         start_time = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -240,12 +249,13 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
         """
         TOTAL_TASKS = 1000
 
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
         ctx.data["pre_count"] = 0
         ctx.data["exec_count"] = 0
         ctx.data["post_count"] = 0
 
+        # Build processor with all tasks in a single level (maximum parallelism)
+        builder = AsyncTaskProcessor.builder()
         for task_num in range(TOTAL_TASKS):
             task_id = f"T{task_num}"
             task = AsyncTask(
@@ -254,7 +264,9 @@ class TestSdaxPerformance(unittest.IsolatedAsyncioTestCase):
                 execute=TaskFunction(lambda c, tid=task_id: perf_execute(c, 1, tid)),
                 post_execute=TaskFunction(lambda c, tid=task_id: perf_post_execute(c, 1, tid)),
             )
-            processor.add_task(task, 1)
+            builder.add_task(task, 1)
+        
+        processor = builder.build()
 
         start_time = time.perf_counter()
         await processor.process_tasks(ctx)

@@ -60,14 +60,16 @@ class PerformanceAnalyzer:
     @staticmethod
     async def test_single_level_overhead():
         """Measure overhead of single level with parallel tasks."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Add 1000 tasks to a single level
+        # Build processor with 1000 tasks in a single level
+        builder = AsyncTaskProcessor.builder()
         for i in range(1000):
-            processor.add_task(
+            builder.add_task(
                 AsyncTask(name=f"T{i}", execute=TaskFunction(lambda c: noop_task(c))), level=1
             )
+        
+        processor = builder.build()
 
         start = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -89,16 +91,18 @@ class PerformanceAnalyzer:
     @staticmethod
     async def test_multi_level_overhead():
         """Measure overhead of multiple sequential levels."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Add 10 tasks per level across 100 levels
+        # Build processor with 10 tasks per level across 100 levels
+        builder = AsyncTaskProcessor.builder()
         for level in range(1, 101):
             for i in range(10):
-                processor.add_task(
+                builder.add_task(
                     AsyncTask(name=f"L{level}-T{i}", execute=TaskFunction(lambda c: noop_task(c))),
                     level=level,
                 )
+        
+        processor = builder.build()
 
         start = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -121,12 +125,12 @@ class PerformanceAnalyzer:
     @staticmethod
     async def test_three_phase_overhead():
         """Measure overhead when all three phases are used."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Add 1000 tasks with pre, exec, and post
+        # Build processor with 1000 tasks with pre, exec, and post
+        builder = AsyncTaskProcessor.builder()
         for i in range(1000):
-            processor.add_task(
+            builder.add_task(
                 AsyncTask(
                     name=f"T{i}",
                     pre_execute=TaskFunction(lambda c: noop_task(c)),
@@ -135,6 +139,8 @@ class PerformanceAnalyzer:
                 ),
                 level=1,
             )
+        
+        processor = builder.build()
 
         start = time.perf_counter()
         await processor.process_tasks(ctx)
@@ -217,13 +223,13 @@ class PerformanceAnalyzer:
 
 async def run_profiled_test():
     """Run a test with cProfile to see where time is spent."""
-    processor = AsyncTaskProcessor()
     ctx = TaskContext()
 
-    # 100 levels, 5 tasks each = 500 tasks
+    # Build processor with 100 levels, 5 tasks each = 500 tasks
+    builder = AsyncTaskProcessor.builder()
     for level in range(1, 101):
         for i in range(5):
-            processor.add_task(
+            builder.add_task(
                 AsyncTask(
                     name=f"L{level}-T{i}",
                     pre_execute=TaskFunction(lambda c: noop_task(c)),
@@ -232,6 +238,8 @@ async def run_profiled_test():
                 ),
                 level=level,
             )
+    
+    processor = builder.build()
 
     await processor.process_tasks(ctx)
 

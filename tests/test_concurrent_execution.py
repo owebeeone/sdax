@@ -49,39 +49,38 @@ class TestConcurrentExecution(unittest.IsolatedAsyncioTestCase):
         
         This would have failed before the _ExecutionContext refactor.
         """
-        # Create a single processor with tasks
-        processor = AsyncTaskProcessor()
-        
-        processor.add_task(
-            AsyncTask(
-                name="SetID",
-                pre_execute=TaskFunction(set_execution_id),
-            ),
-            level=1,
-        )
-        
-        processor.add_task(
-            AsyncTask(
-                name="Increment1",
-                execute=TaskFunction(increment_counter),
-            ),
-            level=1,
-        )
-        
-        processor.add_task(
-            AsyncTask(
-                name="Increment2",
-                execute=TaskFunction(increment_counter),
-            ),
-            level=1,
-        )
-        
-        processor.add_task(
-            AsyncTask(
-                name="Verify",
-                post_execute=TaskFunction(verify_execution_id),
-            ),
-            level=2,
+        # Build a single immutable processor with tasks
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="SetID",
+                    pre_execute=TaskFunction(set_execution_id),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="Increment1",
+                    execute=TaskFunction(increment_counter),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="Increment2",
+                    execute=TaskFunction(increment_counter),
+                ),
+                level=1,
+            )
+            .add_task(
+                AsyncTask(
+                    name="Verify",
+                    post_execute=TaskFunction(verify_execution_id),
+                ),
+                level=2,
+            )
+            .build()
         )
         
         # Create multiple contexts with different execution IDs
@@ -116,8 +115,6 @@ class TestConcurrentExecution(unittest.IsolatedAsyncioTestCase):
         Test concurrent executions where some fail, ensuring failures
         don't interfere with successful executions.
         """
-        processor = AsyncTaskProcessor()
-        
         async def maybe_fail(ctx: TaskContext):
             """Fail if execution_id is even."""
             await asyncio.sleep(0.01)
@@ -125,9 +122,13 @@ class TestConcurrentExecution(unittest.IsolatedAsyncioTestCase):
             if ctx.execution_id % 2 == 0:
                 raise ValueError(f"Execution {ctx.execution_id} failed intentionally")
         
-        processor.add_task(
-            AsyncTask(name="MaybeFail", execute=TaskFunction(maybe_fail)),
-            level=1,
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(name="MaybeFail", execute=TaskFunction(maybe_fail)),
+                level=1,
+            )
+            .build()
         )
         
         # Run 6 concurrent executions (IDs 0-5, evens will fail)
@@ -163,9 +164,9 @@ class TestConcurrentExecution(unittest.IsolatedAsyncioTestCase):
         """
         Stress test with many concurrent executions to catch race conditions.
         """
-        processor = AsyncTaskProcessor()
+        # Build processor with multiple tasks across multiple levels
+        builder = AsyncTaskProcessor.builder()
         
-        # Add multiple tasks across multiple levels
         for level in range(1, 4):
             for task_num in range(5):
                 async def task_func(ctx: TaskContext, lvl=level, num=task_num):
@@ -173,13 +174,15 @@ class TestConcurrentExecution(unittest.IsolatedAsyncioTestCase):
                     key = f"L{lvl}T{num}"
                     ctx.data[key] = ctx.execution_id
                 
-                processor.add_task(
+                builder.add_task(
                     AsyncTask(
                         name=f"L{level}T{task_num}",
                         execute=TaskFunction(task_func),
                     ),
                     level=level,
                 )
+        
+        processor = builder.build()
         
         # Run 50 concurrent executions
         NUM_EXECUTIONS = 50

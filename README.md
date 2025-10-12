@@ -16,12 +16,13 @@ It is ideal for building the internal logic of a single, fast operation, such as
 
 ## Key Features
 
+- **Immutable Builder Pattern**: Build processors using a fluent builder API that produces immutable, reusable processor instances.
 - **Structured Lifecycle**: Enforces a rigid `pre-execute` -> `execute` -> `post-execute` lifecycle for all tasks.
 - **Tiered Parallel Execution**: Tasks are grouped into integer "levels." All tasks at a given level are executed in parallel, and the framework ensures all tasks at level `N` complete successfully before level `N+1` begins.
 - **Guaranteed Cleanup**: `post-execute` runs for **any task whose `pre-execute` was started**, regardless of whether it succeeded, failed, or was cancelled. This ensures resources are always released.
 - **Concurrent Execution Safe**: Multiple concurrent executions of the same processor instance are fully isolated, perfect for high-throughput API endpoints.
-- **Declarative & Flexible**: Define tasks as simple data classes. Methods for each phase are optional, and each can have its own timeout and retry configuration.
-- **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, with minimal overhead (see Performance section for details).
+- **Declarative & Flexible**: Define tasks and task functions as frozen dataclasses. Methods for each phase are optional, and each can have its own timeout and retry configuration.
+- **Lightweight**: Runs directly inside your application's event loop with minimal dependencies (datatrees, frozendict), with minimal overhead (see Performance section for details).
 
 ## Installation
 
@@ -76,35 +77,38 @@ async def close_db_connection(ctx: TaskContext):
     print("Connection closed.")
 
 async def main():
-    # 3. Create a processor and a context
-    processor = AsyncTaskProcessor()
+    # 3. Create your context
     ctx = TaskContext()
 
-    # 4. Declaratively define your workflow
-    processor.add_task(
-        level=1,
-        task=AsyncTask(
-            name="Authentication",
-            pre_execute=TaskFunction(function=check_auth),
-            post_execute=TaskFunction(function=close_db_connection)
+    # 4. Build an immutable processor with declarative workflow
+    processor = (
+        AsyncTaskProcessor.builder()
+        .add_task(
+            level=1,
+            task=AsyncTask(
+                name="Authentication",
+                pre_execute=TaskFunction(function=check_auth),
+                post_execute=TaskFunction(function=close_db_connection)
+            )
         )
-    )
-    processor.add_task(
-        level=1,
-        task=AsyncTask(
-            name="FeatureFlags",
-            pre_execute=TaskFunction(function=load_feature_flags)
+        .add_task(
+            level=1,
+            task=AsyncTask(
+                name="FeatureFlags",
+                pre_execute=TaskFunction(function=load_feature_flags)
+            )
         )
-    )
-    processor.add_task(
-        level=2,
-        task=AsyncTask(
-            name="UserData",
-            execute=TaskFunction(function=fetch_user_data)
+        .add_task(
+            level=2,
+            task=AsyncTask(
+                name="UserData",
+                execute=TaskFunction(function=fetch_user_data)
+            )
         )
+        .build()
     )
 
-    # 4. Run the processor
+    # 5. Run the processor (can be reused for multiple concurrent executions)
     try:
         await processor.process_tasks(ctx)
         print("\nWorkflow completed successfully!")
@@ -241,12 +245,15 @@ Each task can define up to 3 optional phases:
 
 4. **High-Throughput API Server** (Concurrent Execution)
    ```python
-   # Define workflow once
-   processor = AsyncTaskProcessor()
-   processor.add_task(AsyncTask("Auth", ...), level=1)
-   processor.add_task(AsyncTask("FetchData", ...), level=2)
+   # Build immutable workflow once at startup
+   processor = (
+       AsyncTaskProcessor.builder()
+       .add_task(AsyncTask("Auth", ...), level=1)
+       .add_task(AsyncTask("FetchData", ...), level=2)
+       .build()
+   )
    
-   # Handle thousands of concurrent requests
+   # Reuse processor for thousands of concurrent requests
    @app.post("/api/endpoint")
    async def handle_request(user_id: int):
        ctx = RequestContext(user_id=user_id)
@@ -296,12 +303,14 @@ AsyncTask(
     name="FlakeyAPI",
     execute=TaskFunction(
         function=call_external_api,
-        timeout=5.0,        # 5 second timeout
+        timeout=5.0,        # 5 second timeout (use None for no timeout)
         retries=3,          # Retry 3 times
         backoff_factor=2.0  # Exponential backoff: 2s, 4s, 8s
     )
 )
 ```
+
+**Note:** `AsyncTask` and `TaskFunction` are frozen dataclasses, ensuring immutability and thread-safety. Once created, they cannot be modified.
 
 ### Shared Context
 
@@ -325,14 +334,17 @@ async def task_b(ctx: TaskContext):
 
 ### Concurrent Execution
 
-**New in v0.1.0:** You can safely run multiple concurrent executions of the same `AsyncTaskProcessor` instance:
+You can safely run multiple concurrent executions of the same immutable `AsyncTaskProcessor` instance:
 
 ```python
-processor = AsyncTaskProcessor()
-# Add tasks once...
-processor.add_task(AsyncTask(...), level=1)
+# Build immutable processor once at startup
+processor = (
+    AsyncTaskProcessor.builder()
+    .add_task(AsyncTask(...), level=1)
+    .build()
+)
 
-# Run multiple requests concurrently - each with its own context
+# Reuse processor for multiple concurrent requests - each with its own context
 await asyncio.gather(
     processor.process_tasks(RequestContext(user_id=123)),
     processor.process_tasks(RequestContext(user_id=456)),

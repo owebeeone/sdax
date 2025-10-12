@@ -52,35 +52,39 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_multi_level_execution_order(self):
         """Verify the correct execution order for a successful run."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Level 1
-        processor.add_task(
-            AsyncTask(
-                "L1A",
-                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
-            ),
-            1,
-        )
-        processor.add_task(
-            AsyncTask(
-                "L1B",
-                pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1B", c)),
-            ),
-            1,
-        )
-        # Level 2
-        processor.add_task(
-            AsyncTask(
-                "L2A",
-                pre_execute=TaskFunction(lambda c: log_pre("L2A", c)),
-                execute=TaskFunction(lambda c: log_exec("L2A", c)),
-                post_execute=TaskFunction(lambda c: log_post("L2A", c)),
-            ),
-            2,
+        # Build processor with tasks
+        processor = (
+            AsyncTaskProcessor.builder()
+            # Level 1
+            .add_task(
+                AsyncTask(
+                    "L1A",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                ),
+                1,
+            )
+            .add_task(
+                AsyncTask(
+                    "L1B",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+                ),
+                1,
+            )
+            # Level 2
+            .add_task(
+                AsyncTask(
+                    "L2A",
+                    pre_execute=TaskFunction(lambda c: log_pre("L2A", c)),
+                    execute=TaskFunction(lambda c: log_exec("L2A", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+                ),
+                2,
+            )
+            .build()
         )
 
         await processor.process_tasks(ctx)
@@ -98,34 +102,37 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_pre_execute_failure_teardown_order(self):
         """Verify correct teardown when a pre_execute fails."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # Level 1
-        processor.add_task(
-            AsyncTask(
-                "L1A",
-                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
-            ),
-            1,
-        )
-        # Level 2
-        processor.add_task(
-            AsyncTask(
-                "L2A",
-                pre_execute=TaskFunction(lambda c: fail_pre("L2A", c)),
-                post_execute=TaskFunction(lambda c: log_post("L2A", c)),
-            ),
-            2,
-        )
-        processor.add_task(
-            AsyncTask(
-                "L2B",
-                pre_execute=TaskFunction(lambda c: log_pre("L2B", c)),
-                post_execute=TaskFunction(lambda c: log_post("L2B", c)),
-            ),
-            2,
+        processor = (
+            AsyncTaskProcessor.builder()
+            # Level 1
+            .add_task(
+                AsyncTask(
+                    "L1A",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                ),
+                1,
+            )
+            # Level 2
+            .add_task(
+                AsyncTask(
+                    "L2A",
+                    pre_execute=TaskFunction(lambda c: fail_pre("L2A", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+                ),
+                2,
+            )
+            .add_task(
+                AsyncTask(
+                    "L2B",
+                    pre_execute=TaskFunction(lambda c: log_pre("L2B", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L2B", c)),
+                ),
+                2,
+            )
+            .build()
         )
 
         with self.assertRaises(ExceptionGroup):
@@ -150,25 +157,28 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_failure_teardown_order(self):
         """Verify correct teardown when an execute fails."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        processor.add_task(
-            AsyncTask(
-                "L1A",
-                pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1A", c)),
-            ),
-            1,
-        )
-        processor.add_task(
-            AsyncTask(
-                "L1B",
-                pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
-                execute=TaskFunction(lambda c: fail_exec("L1B", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1B", c)),
-            ),
-            1,
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    "L1A",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                ),
+                1,
+            )
+            .add_task(
+                AsyncTask(
+                    "L1B",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
+                    execute=TaskFunction(lambda c: fail_exec("L1B", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+                ),
+                1,
+            )
+            .build()
         )
 
         with self.assertRaises(ExceptionGroup):
@@ -185,33 +195,37 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_tasks_with_missing_functions(self):
         """Verify tasks with None functions are handled correctly."""
-        processor = AsyncTaskProcessor()
         ctx = TaskContext()
 
-        # No pre_execute, should still run execute and post
-        processor.add_task(
-            AsyncTask(
-                "L1-NoPre",
-                execute=TaskFunction(lambda c: log_exec("L1-NoPre", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1-NoPre", c)),
-            ),
-            1,
-        )
-        # No execute, should still run pre and post
-        processor.add_task(
-            AsyncTask(
-                "L1-NoExec",
-                pre_execute=TaskFunction(lambda c: log_pre("L1-NoExec", c)),
-                post_execute=TaskFunction(lambda c: log_post("L1-NoExec", c)),
-            ),
-            1,
-        )
-        # Only post_execute, should not run pre or exec
-        processor.add_task(
-            AsyncTask(
-                "L2-PostOnly", post_execute=TaskFunction(lambda c: log_post("L2-PostOnly", c))
-            ),
-            2,
+        # Build processor with tasks having various combinations of phases
+        processor = (
+            AsyncTaskProcessor.builder()
+            # No pre_execute, should still run execute and post
+            .add_task(
+                AsyncTask(
+                    "L1-NoPre",
+                    execute=TaskFunction(lambda c: log_exec("L1-NoPre", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1-NoPre", c)),
+                ),
+                1,
+            )
+            # No execute, should still run pre and post
+            .add_task(
+                AsyncTask(
+                    "L1-NoExec",
+                    pre_execute=TaskFunction(lambda c: log_pre("L1-NoExec", c)),
+                    post_execute=TaskFunction(lambda c: log_post("L1-NoExec", c)),
+                ),
+                1,
+            )
+            # Only post_execute, should not run pre or exec
+            .add_task(
+                AsyncTask(
+                    "L2-PostOnly", post_execute=TaskFunction(lambda c: log_post("L2-PostOnly", c))
+                ),
+                2,
+            )
+            .build()
         )
 
         await processor.process_tasks(ctx)
