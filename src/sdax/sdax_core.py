@@ -29,16 +29,27 @@ class AsyncTask:
     post_execute: TaskFunction | None = None
 
 
+@dataclass
+class _ExecutionContext:
+    """Runtime state for a single execution of the processor.
+
+    This allows multiple concurrent executions of the same processor
+    without race conditions, as each execution gets its own isolated context.
+    """
+    user_context: T
+
+
 class _LevelManager:
     """An internal context manager to handle the parallel execution of all
     tasks within a single level for both setup and teardown."""
 
     def __init__(
-        self, level: int, tasks: List[AsyncTask], ctx: T, processor: "AsyncTaskProcessor"
+        self, level: int, tasks: List[AsyncTask], exec_ctx: _ExecutionContext,
+        processor: "AsyncTaskProcessor"
     ):
         self.level = level
         self.tasks = tasks
-        self.ctx = ctx
+        self.exec_ctx = exec_ctx
         self.processor = processor
         self.active_tasks: List[AsyncTask] = []
         self.started_tasks: List[AsyncTask] = []  # Tasks that started pre_execute
@@ -48,10 +59,6 @@ class _LevelManager:
     async def __aenter__(self) -> List[AsyncTask]:
         """Runs pre_execute for tasks that have it, and considers tasks
         without it as implicitly successful."""
-        # Attach context to all tasks in this level
-        for task in self.tasks:
-            setattr(task, "_ctx", self.ctx)
-
         successful_tasks: List[AsyncTask] = []
         tasks_to_run: List[AsyncTask] = []
 
@@ -66,7 +73,9 @@ class _LevelManager:
             try:
                 async with asyncio.TaskGroup() as tg:
                     pre_exec_map = {
-                        tg.create_task(self.processor._execute_phase(task, "pre_execute")): task
+                        tg.create_task(
+                            self.processor._execute_phase(task, "pre_execute", self.exec_ctx)
+                        ): task
                         for task in tasks_to_run
                     }
             except* Exception as eg:
@@ -121,7 +130,9 @@ class _LevelManager:
             try:
                 # Each post_execute gets its own TaskGroup for child task management
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(self.processor._execute_phase(task, "post_execute"))
+                    tg.create_task(
+                        self.processor._execute_phase(task, "post_execute", self.exec_ctx)
+                    )
             except* Exception as eg:
                 # Capture exception but don't propagate
                 exception_caught = eg
@@ -147,7 +158,7 @@ class AsyncTaskProcessor:
     def add_task(self, task: AsyncTask, level: int):
         self.tasks[level].append(task)
 
-    async def _execute_phase(self, task: AsyncTask, phase: str):
+    async def _execute_phase(self, task: AsyncTask, phase: str, exec_ctx: _ExecutionContext):
         """A helper method to wrap the execution of a single task phase
         with its configured timeout and retry logic."""
         task_func_obj = getattr(task, phase)
@@ -159,11 +170,8 @@ class AsyncTaskProcessor:
         timeout = task_func_obj.timeout
         backoff_factor = task_func_obj.backoff_factor
 
-        # We need a context attached to the task for the function call
-        ctx = getattr(task, "_ctx", None)
-        if not ctx:
-            msg = f"TaskContext not found on task '{task.name}' during phase '{phase}'"
-            raise RuntimeError(msg)
+        # All tasks in this execution share the same user context
+        ctx = exec_ctx.user_context
 
         for attempt in range(retries + 1):
             try:
@@ -184,14 +192,21 @@ class AsyncTaskProcessor:
                 await asyncio.sleep(delay)
 
     async def process_tasks(self, ctx: T):
-        """The main entry point to run the entire tiered workflow."""
+        """The main entry point to run the entire tiered workflow.
+
+        Creates an isolated execution context for this run, enabling
+        safe concurrent executions of the same processor instance.
+        """
+        # Create execution context for this run
+        exec_ctx = _ExecutionContext(user_context=ctx)
+
         active_tasks: List[AsyncTask] = []
         level_managers: List[_LevelManager] = []
 
         async with AsyncExitStack() as stack:
             sorted_levels = sorted(self.tasks.keys())
             for level in sorted_levels:
-                level_manager = _LevelManager(level, self.tasks[level], ctx, self)
+                level_manager = _LevelManager(level, self.tasks[level], exec_ctx, self)
                 level_managers.append(level_manager)
                 tasks_from_level = await stack.enter_async_context(level_manager)
                 active_tasks.extend(tasks_from_level)
@@ -201,7 +216,7 @@ class AsyncTaskProcessor:
                 async with asyncio.TaskGroup() as tg:
                     for task in active_tasks:
                         if task.execute:
-                            tg.create_task(self._execute_phase(task, "execute"))
+                            tg.create_task(self._execute_phase(task, "execute", exec_ctx))
             except* Exception as eg:
                 execute_exception = eg
 
