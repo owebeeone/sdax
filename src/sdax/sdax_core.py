@@ -13,11 +13,19 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class TaskFunction(Generic[T]):
-    """Encapsulates a callable with its own execution parameters."""
+    """Encapsulates a callable with its own execution parameters.
 
+    Retry timing:
+    - First retry: initial_delay * uniform(0.5, 1.0)
+    - Subsequent retries: initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
+
+    This gives minimum delay of initial_delay * 0.5 and maximum of initial_delay,
+    with exponential growth controlled by backoff_factor.
+    """
     function: Callable[[T], Awaitable[None]]
     timeout: float | None = 2.0  # None means no timeout
     retries: int = 0
+    initial_delay: float = 1.0  # Initial retry delay in seconds
     backoff_factor: float = 2.0
 
 
@@ -208,6 +216,7 @@ class AsyncTaskProcessor:
         func = task_func_obj.function
         retries = task_func_obj.retries
         timeout = task_func_obj.timeout
+        initial_delay = task_func_obj.initial_delay
         backoff_factor = task_func_obj.backoff_factor
 
         # All tasks in this execution share the same user context
@@ -224,7 +233,13 @@ class AsyncTaskProcessor:
                 if attempt >= retries:
                     raise
 
-                delay = (backoff_factor**attempt) + random.uniform(0, 0.5)
+                # Calculate delay with exponential backoff and multiplicative jitter
+                # delay = initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
+                # This gives min delay of initial_delay * 0.5 and max of initial_delay
+                # on first retry
+                delay = initial_delay * (backoff_factor ** attempt) * random.uniform(
+                    0.5, 1.0
+                )
                 await asyncio.sleep(delay)
 
     async def process_tasks(self, ctx: T):

@@ -303,12 +303,21 @@ AsyncTask(
     name="FlakeyAPI",
     execute=TaskFunction(
         function=call_external_api,
-        timeout=5.0,        # 5 second timeout (use None for no timeout)
-        retries=3,          # Retry 3 times
-        backoff_factor=2.0  # Exponential backoff: 2s, 4s, 8s
+        timeout=5.0,         # 5 second timeout (use None for no timeout)
+        retries=3,           # Retry 3 times
+        initial_delay=1.0,   # Start retries at 1 second (default)
+        backoff_factor=2.0   # Exponential backoff: 1s, 2s, 4s
     )
 )
 ```
+
+**Retry Timing Calculation:**
+- Each retry delay: `initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)`
+- With `initial_delay=1.0`, `backoff_factor=2.0`:
+  - First retry: 0.5s to 1.0s (average 0.75s)
+  - Second retry: 1.0s to 2.0s (average 1.5s)
+  - Third retry: 2.0s to 4.0s (average 3.0s)
+- The `uniform(0.5, 1.0)` jitter prevents thundering herd
 
 **Note:** `AsyncTask` and `TaskFunction` are frozen dataclasses, ensuring immutability and thread-safety. Once created, they cannot be modified.
 
