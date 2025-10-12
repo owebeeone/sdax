@@ -19,6 +19,7 @@ It is ideal for building the internal logic of a single, fast operation, such as
 - **Structured Lifecycle**: Enforces a rigid `pre-execute` -> `execute` -> `post-execute` lifecycle for all tasks.
 - **Tiered Parallel Execution**: Tasks are grouped into integer "levels." All tasks at a given level are executed in parallel, and the framework ensures all tasks at level `N` complete successfully before level `N+1` begins.
 - **Guaranteed Cleanup**: `post-execute` runs for **any task whose `pre-execute` was started**, regardless of whether it succeeded, failed, or was cancelled. This ensures resources are always released.
+- **Concurrent Execution Safe**: Multiple concurrent executions of the same processor instance are fully isolated, perfect for high-throughput API endpoints.
 - **Declarative & Flexible**: Define tasks as simple data classes. Methods for each phase are optional, and each can have its own timeout and retry configuration.
 - **Lightweight & Dependency-Free**: Runs directly inside your application's event loop with no external dependencies, schedulers, or databases, with minimal overhead (see Performance section for details).
 
@@ -238,6 +239,21 @@ Each task can define up to 3 optional phases:
    Level 3: [Deploy, NotifySlack]
    ```
 
+4. **High-Throughput API Server** (Concurrent Execution)
+   ```python
+   # Define workflow once
+   processor = AsyncTaskProcessor()
+   processor.add_task(AsyncTask("Auth", ...), level=1)
+   processor.add_task(AsyncTask("FetchData", ...), level=2)
+   
+   # Handle thousands of concurrent requests
+   @app.post("/api/endpoint")
+   async def handle_request(user_id: int):
+       ctx = RequestContext(user_id=user_id)
+       await processor.process_tasks(ctx)
+       return ctx.results
+   ```
+
 ### ❌ Not Suitable For
 
 - Simple sequential operations (just use `await`)
@@ -306,6 +322,91 @@ async def task_b(ctx: TaskContext):
 ```
 
 **Note**: The context is shared but not thread-safe. Since tasks run in a single asyncio event loop, no locking is needed.
+
+### Concurrent Execution
+
+**New in v0.1.0:** You can safely run multiple concurrent executions of the same `AsyncTaskProcessor` instance:
+
+```python
+processor = AsyncTaskProcessor()
+# Add tasks once...
+processor.add_task(AsyncTask(...), level=1)
+
+# Run multiple requests concurrently - each with its own context
+await asyncio.gather(
+    processor.process_tasks(RequestContext(user_id=123)),
+    processor.process_tasks(RequestContext(user_id=456)),
+    processor.process_tasks(RequestContext(user_id=789)),
+)
+```
+
+**⚠️ Critical Requirements for Concurrent Execution:**
+
+1. **Context Must Be Self-Contained**
+   - Your context must fully contain all request-specific state
+   - Do NOT rely on global variables, class attributes, or module-level state
+   - Each execution gets its own isolated context instance
+
+2. **Task Functions Must Be Pure (No External Side Effects)**
+   - ❌ **BAD**: Writing to shared files, databases, or caches without coordination
+   - ❌ **BAD**: Modifying global state or class variables
+   - ❌ **BAD**: Using non-isolated external resources
+   - ✅ **GOOD**: Reading from the context
+   - ✅ **GOOD**: Writing to the context
+   - ✅ **GOOD**: Making HTTP requests (each execution independent)
+   - ✅ **GOOD**: Database operations with per-execution connections
+
+3. **Example - Safe Concurrent Execution:**
+
+```python
+@dataclass
+class RequestContext:
+    # All request state contained in context
+    user_id: int
+    db_connection: Any = None
+    api_results: dict = field(default_factory=dict)
+
+async def open_db(ctx: RequestContext):
+    # Each execution gets its own connection
+    ctx.db_connection = await db_pool.acquire()
+
+async def fetch_user_data(ctx: RequestContext):
+    # Uses this execution's connection
+    ctx.api_results["user"] = await ctx.db_connection.fetch_user(ctx.user_id)
+
+async def close_db(ctx: RequestContext):
+    # Cleans up this execution's connection
+    if ctx.db_connection:
+        await ctx.db_connection.close()
+
+# Safe - each execution isolated
+processor.add_task(
+    AsyncTask("DB", pre_execute=TaskFunction(open_db), post_execute=TaskFunction(close_db)),
+    level=1
+)
+```
+
+4. **Example - UNSAFE Concurrent Execution:**
+
+```python
+# ❌ WRONG - shared state causes race conditions
+SHARED_CACHE = {}
+
+async def unsafe_task(ctx: RequestContext):
+    # Race condition! Multiple executions writing to same dict
+    SHARED_CACHE[ctx.user_id] = await fetch_data(ctx.user_id)  # BAD!
+```
+
+**When NOT to use concurrent execution:**
+- Your task functions have uncoordinated side effects (file writes, shared caches)
+- Your tasks rely on global or class-level state
+- Your tasks modify shared resources without proper locking
+
+**When concurrent execution is perfect:**
+- Each request has its own isolated resources (DB connections, API clients)
+- All state is contained in the context
+- Tasks are functionally pure (output depends only on context input)
+- High-throughput API endpoints serving independent requests
 
 ## Testing
 
