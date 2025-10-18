@@ -1,52 +1,30 @@
+"""
+SDAX core engine classes.
+
+This module contains the core engine classes for the SDAX framework.
+"""
 import asyncio
 import random
 from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, Generic, List, TypeVar
+from typing import Dict, Generic, List, TypeVar
 
 from datatrees import datatree, dtfield
 from frozendict import frozendict
+from sdax.sdax_task_analyser import TaskAnalysis
+from sdax.tasks import AsyncTask, TaskFunction
 
 T = TypeVar("T")
 
-
-@dataclass(frozen=True)
-class TaskFunction(Generic[T]):
-    """Encapsulates a callable with its own execution parameters.
-
-    Retry timing:
-    - First retry: initial_delay * uniform(0.5, 1.0)
-    - Subsequent retries: initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
-
-    This gives minimum delay of initial_delay * 0.5 and maximum of initial_delay,
-    with exponential growth controlled by backoff_factor.
-    """
-    function: Callable[[T], Awaitable[None]]
-    timeout: float | None = 2.0  # None means no timeout
-    retries: int = 0
-    initial_delay: float = 1.0  # Initial retry delay in seconds
-    backoff_factor: float = 2.0
-
-
-@dataclass(frozen=True)
-class AsyncTask:
-    """A declarative definition of a task with optional pre-execute, execute,
-    and post-execute phases, each with its own configuration."""
-
-    name: str
-    pre_execute: TaskFunction | None = None
-    execute: TaskFunction | None = None
-    post_execute: TaskFunction | None = None
-
-
 @dataclass
-class _ExecutionContext:
+class _ExecutionContext(Generic[T]):
     """Runtime state for a single execution of the processor.
 
     This allows multiple concurrent executions of the same processor
     without race conditions, as each execution gets its own isolated context.
     """
+
     user_context: T
 
 
@@ -55,8 +33,11 @@ class _LevelManager:
     tasks within a single level for both setup and teardown."""
 
     def __init__(
-        self, level: int, tasks: List[AsyncTask], exec_ctx: _ExecutionContext,
-        processor: "AsyncTaskProcessor"
+        self,
+        level: int,
+        tasks: List[AsyncTask],
+        exec_ctx: _ExecutionContext,
+        processor: "AsyncTaskProcessor",
     ):
         self.level = level
         self.tasks = tasks
@@ -161,17 +142,17 @@ class _LevelManager:
 
 
 @dataclass
-class AsyncTaskProcessorBuilder:
+class AsyncTaskProcessorBuilder(Generic[T]):
     """The builder for the core engine that processes a collection of tiered async tasks."""
 
-    tasks: Dict[int, List[AsyncTask]] = field(default_factory=lambda: defaultdict(list))
+    tasks: Dict[int, List[AsyncTask[T]]] = field(default_factory=lambda: defaultdict(list))
 
-    def add_task(self, task: AsyncTask, level: int) -> 'AsyncTaskProcessorBuilder':
+    def add_task(self, task: AsyncTask[T], level: int) -> "AsyncTaskProcessorBuilder[T]":
         """Add a task at the specified level. Returns self for fluent chaining."""
         self.tasks[level].append(task)
         return self
 
-    def build(self) -> 'AsyncTaskProcessor':
+    def build(self) -> "AsyncTaskProcessor[T]":
         """Build an immutable AsyncTaskProcessor from the accumulated tasks."""
         # Convert defaultdict to regular dict and freeze task lists
         frozen_tasks = {level: tuple(tasks) for level, tasks in self.tasks.items()}
@@ -179,14 +160,14 @@ class AsyncTaskProcessorBuilder:
 
 
 @datatree(frozen=True)
-class AsyncTaskProcessor:
+class AsyncTaskProcessor(Generic[T]):
     """Immutable core engine that processes a collection of tiered async tasks.
 
     This class is frozen and can be safely shared across multiple concurrent
     executions. Use AsyncTaskProcessorBuilder to construct instances.
     """
 
-    tasks: frozendict[int, tuple[AsyncTask, ...]]
+    tasks: frozendict[int, tuple[AsyncTask[T], ...]]
 
     # Calculated field: sorted levels for iteration
     sorted_levels: tuple[int, ...] = dtfield(
@@ -194,11 +175,11 @@ class AsyncTaskProcessor:
     )
 
     @staticmethod
-    def builder() -> AsyncTaskProcessorBuilder:
+    def builder() -> AsyncTaskProcessorBuilder[T]:
         """Create a new builder for constructing an immutable processor."""
-        return AsyncTaskProcessorBuilder()
+        return AsyncTaskProcessorBuilder[T]()
 
-    async def _execute_phase(self, task: AsyncTask, phase: str, exec_ctx: _ExecutionContext):
+    async def _execute_phase(self, task: AsyncTask[T], phase: str, exec_ctx: _ExecutionContext[T]):
         """A helper method to wrap the execution of a single task phase
         with its configured timeout and retry logic."""
         task_func_obj = getattr(task, phase)
@@ -229,9 +210,7 @@ class AsyncTaskProcessor:
                 # delay = initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
                 # This gives min delay of initial_delay * 0.5 and max of initial_delay
                 # on first retry
-                delay = initial_delay * (backoff_factor ** attempt) * random.uniform(
-                    0.5, 1.0
-                )
+                delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
                 await asyncio.sleep(delay)
 
     async def process_tasks(self, ctx: T):
@@ -278,3 +257,41 @@ class AsyncTaskProcessor:
             else:
                 msg = "Multiple failures during task execution"
                 raise ExceptionGroup(msg, exceptions)
+
+
+@dataclass
+class AsyncDagTaskProcessorBuilder:
+    """Builder for DAG-based task processor using precomputed TaskAnalysis."""
+
+    analysis: TaskAnalysis | None = None
+
+    def from_analysis(self, analysis: TaskAnalysis) -> "AsyncDagTaskProcessorBuilder":
+        self.analysis = analysis
+        return self
+
+    def build(self) -> "AsyncDagTaskProcessor":
+        if self.analysis is None:
+            raise ValueError("TaskAnalysis must be provided via from_analysis()")
+        return AsyncDagTaskProcessor(analysis=self.analysis)
+
+
+@datatree(frozen=True)
+class AsyncDagTaskProcessor:
+    """Immutable DAG executor that consumes TaskAnalysis graphs.
+
+    Execution policy:
+      - Pre: single TaskGroup, staged by wave completed_count against depends_on_tasks.
+      - Execute: single TaskGroup for tasks whose pre succeeded.
+      - Post: per-task isolated TaskGroups driven by post graph and started set.
+    """
+
+    analysis: TaskAnalysis
+
+    @staticmethod
+    def builder() -> AsyncDagTaskProcessorBuilder:
+        return AsyncDagTaskProcessorBuilder()
+
+    async def process_tasks(self, ctx: T):
+        # Placeholder: integrate runtime engine per design doc
+        # For now, raise NotImplementedError to signal future work
+        raise NotImplementedError("AsyncDagTaskProcessor.process_tasks not implemented yet")

@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Dict, List, Set, Tuple
 
-from sdax.sdax_core import AsyncTask
+from sdax.tasks import AsyncTask
 
 
 @dataclass(frozen=True)
