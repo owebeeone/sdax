@@ -157,6 +157,51 @@ async def release_lock(ctx: TaskContext):
 
 ## Execution Model
 
+### Task dependency graph (directed acyclic graph, DAG)
+
+In addition to level-based execution, sdax supports execution driven by a task dependency graph (a directed acyclic graph, DAG), where tasks declare dependencies on other tasks by name. The analyzer groups tasks into waves: a wave is a set of tasks that share the same effective prerequisite tasks and can start together as soon as those prerequisites complete.
+
+- **Waves are start barriers only**: Dependencies remain task-to-task; waves do not depend on waves. A wave becomes ready when all of its prerequisite tasks have completed their `pre_execute` successfully.
+- **Phases**:
+  - `pre_execute`: scheduled by waves. On the first failure, remaining `pre_execute` tasks are cancelled; any task whose pre was started still gets `post_execute` later.
+  - `execute`: runs in a single TaskGroup after all pre phases complete.
+  - `post_execute`: runs in reverse dependency order (via reverse graph waves). Cleanup is best-effort; failures are collected without cancelling sibling cleanup.
+- **Validation**: The `TaskAnalyzer` validates the graph (cycles, missing deps) at build time.
+- **Immutability**: The analyzer output and processors are immutable and safe to reuse across concurrent executions.
+
+Minimal example:
+
+```python
+from sdax import AsyncTask, TaskFunction
+from sdax.sdax_task_analyser import TaskAnalyzer
+from sdax.sdax_core import AsyncDagTaskProcessor
+
+# Define tasks and dependencies by name
+analyzer = TaskAnalyzer()
+analyzer.add_task(AsyncTask(name="A", pre_execute=TaskFunction(lambda c: ...)), depends_on=())
+analyzer.add_task(AsyncTask(name="B", pre_execute=TaskFunction(lambda c: ...)), depends_on=("A",))
+analyzer.add_task(AsyncTask(name="C", execute=TaskFunction(lambda c: ...)), depends_on=("A",))
+analyzer.add_task(AsyncTask(name="D", post_execute=TaskFunction(lambda c: ...)), depends_on=("B","C"))
+
+# Build immutable analysis and processor
+analysis = analyzer.analyze()
+processor = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+
+# Run with your context object
+# await processor.process_tasks(ctx)
+```
+
+Key properties:
+- Tasks with identical effective prerequisites are grouped into the same wave for `pre_execute` scheduling.
+- `execute` runs across all tasks that passed pre, regardless of wave membership.
+- `post_execute` uses the reverse dependency graph to order cleanup, running each task's cleanup in isolation and aggregating exceptions.
+
+Failure semantics:
+- **If any `pre_execute` fails**: all remaining scheduled `pre_execute` tasks are cancelled; no further pre waves are started; the `execute` phase is skipped; `post_execute` still runs for tasks whose pre was started (and for tasks with no pre) in reverse dependency order; exceptions are aggregated.
+- **If any `execute` fails**: other execute tasks continue; `post_execute` runs; exceptions are aggregated.
+- **If any `post_execute` fails**: siblings are not cancelled; all eligible cleanup still runs; exceptions are aggregated.
+- The final error is an `ExceptionGroup` that may include failures from pre, execute, and post.
+
 ### The "Elevator" Pattern
 
 Tasks execute in a strict "elevator up, elevator down" pattern:
