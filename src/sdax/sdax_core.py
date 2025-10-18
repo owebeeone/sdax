@@ -151,138 +151,135 @@ class AsyncTaskProcessorBuilder(Generic[T], ABC):
     def build(self) -> "AsyncTaskProcessor[T]":
         pass
 
-@dataclass
-class AsyncLevelTaskProcessorBuilder(AsyncTaskProcessorBuilder[T]):
-    """The builder for the core engine that processes a collection of tiered async tasks."""
-
-    tasks: Dict[int, List[AsyncTask[T]]] = field(default_factory=lambda: defaultdict(list))
-
-    def add_task(self, task: AsyncTask[T], level: int) -> "AsyncTaskProcessorBuilder[T]":
-        """Add a task at the specified level. Returns self for fluent chaining."""
-        self.tasks[level].append(task)
-        return self
-
-    def build(self) -> "AsyncTaskProcessor[T]":
-        """Build an immutable AsyncTaskProcessor from the accumulated tasks."""
-        # Convert defaultdict to regular dict and freeze task lists
-        frozen_tasks = {level: tuple(tasks) for level, tasks in self.tasks.items()}
-        return AsyncLevelTaskProcessor[T](tasks=frozendict(frozen_tasks))
 
 class AsyncTaskProcessor(Generic[T], ABC):
-
+    """The core engine that processes a collection of async tasks."""
     @abstractmethod
     async def process_tasks(self, ctx: T):
         pass
 
     @staticmethod
     def builder(use_dag: bool = True) -> AsyncTaskProcessorBuilder[T]:
-        if use_dag:
-            return AsyncDagLevelAdapterBuilder[T]()
-        else:
-            return AsyncLevelTaskProcessorBuilder[T]()
+        return AsyncDagLevelAdapterBuilder[T]()
 
 
-@datatree(frozen=True)
-class AsyncLevelTaskProcessor(Generic[T]):
-    """Immutable core engine that processes a collection of tiered async tasks.
+# @dataclass
+# class AsyncLevelTaskProcessorBuilder(AsyncTaskProcessorBuilder[T]):
+#     """The builder for the core engine that processes a collection of tiered async tasks."""
 
-    This class is frozen and can be safely shared across multiple concurrent
-    executions. Use AsyncTaskProcessorBuilder to construct instances.
-    """
+#     tasks: Dict[int, List[AsyncTask[T]]] = field(default_factory=lambda: defaultdict(list))
 
-    tasks: frozendict[int, tuple[AsyncTask[T], ...]]
+#     def add_task(self, task: AsyncTask[T], level: int) -> "AsyncTaskProcessorBuilder[T]":
+#         """Add a task at the specified level. Returns self for fluent chaining."""
+#         self.tasks[level].append(task)
+#         return self
 
-    # Calculated field: sorted levels for iteration
-    sorted_levels: tuple[int, ...] = dtfield(
-        self_default=lambda self: tuple(sorted(self.tasks.keys()))
-    )
+#     def build(self) -> "AsyncTaskProcessor[T]":
+#         """Build an immutable AsyncTaskProcessor from the accumulated tasks."""
+#         # Convert defaultdict to regular dict and freeze task lists
+#         frozen_tasks = {level: tuple(tasks) for level, tasks in self.tasks.items()}
+#         return AsyncLevelTaskProcessor[T](tasks=frozendict(frozen_tasks))
 
-    @staticmethod
-    def builder(use_dag: bool = False) -> AsyncTaskProcessorBuilder[T]:
-        """Create a new builder for constructing an immutable processor."""
-        if use_dag:
-            return AsyncDagLevelAdapterBuilder[T]()
-        else:
-            return AsyncLevelTaskProcessorBuilder[T]()
 
-    async def _execute_phase(self, task: AsyncTask[T], phase: str, exec_ctx: _ExecutionContext[T]):
-        """A helper method to wrap the execution of a single task phase
-        with its configured timeout and retry logic."""
-        task_func_obj = getattr(task, phase)
-        if not task_func_obj:
-            return
 
-        func = task_func_obj.function
-        retries = task_func_obj.retries
-        timeout = task_func_obj.timeout
-        initial_delay = task_func_obj.initial_delay
-        backoff_factor = task_func_obj.backoff_factor
+# @datatree(frozen=True)
+# class AsyncLevelTaskProcessor(Generic[T]):
+#     """Immutable core engine that processes a collection of tiered async tasks.
 
-        # All tasks in this execution share the same user context
-        ctx = exec_ctx.user_context
+#     This class is frozen and can be safely shared across multiple concurrent
+#     executions. Use AsyncTaskProcessorBuilder to construct instances.
+#     """
 
-        for attempt in range(retries + 1):
-            try:
-                if timeout is None:
-                    await func(ctx)
-                else:
-                    await asyncio.wait_for(func(ctx), timeout=timeout)
-                return  # Success
-            except (asyncio.TimeoutError, ConnectionError) as _:
-                if attempt >= retries:
-                    raise
+#     tasks: frozendict[int, tuple[AsyncTask[T], ...]]
 
-                # Calculate delay with exponential backoff and multiplicative jitter
-                # delay = initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
-                # This gives min delay of initial_delay * 0.5 and max of initial_delay
-                # on first retry
-                delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
-                await asyncio.sleep(delay)
+#     # Calculated field: sorted levels for iteration
+#     sorted_levels: tuple[int, ...] = dtfield(
+#         self_default=lambda self: tuple(sorted(self.tasks.keys()))
+#     )
 
-    async def process_tasks(self, ctx: T):
-        """The main entry point to run the entire tiered workflow.
+#     @staticmethod
+#     def builder() -> AsyncTaskProcessorBuilder[T]:
+#         """Create a new builder for constructing an immutable processor."""
+#         return AsyncLevelTaskProcessorBuilder[T]()
 
-        Creates an isolated execution context for this run, enabling
-        safe concurrent executions of the same processor instance.
-        """
-        # Create execution context for this run
-        exec_ctx = _ExecutionContext(user_context=ctx)
+#     async def _execute_phase(self, task: AsyncTask[T], phase: str, exec_ctx: _ExecutionContext[T]):
+#         """A helper method to wrap the execution of a single task phase
+#         with its configured timeout and retry logic."""
+#         task_func_obj = getattr(task, phase)
+#         if not task_func_obj:
+#             return
 
-        active_tasks: List[AsyncTask] = []
-        level_managers: List[_LevelManager] = []
+#         func = task_func_obj.function
+#         retries = task_func_obj.retries
+#         timeout = task_func_obj.timeout
+#         initial_delay = task_func_obj.initial_delay
+#         backoff_factor = task_func_obj.backoff_factor
 
-        async with AsyncExitStack() as stack:
-            for level in self.sorted_levels:
-                level_manager = _LevelManager(level, self.tasks[level], exec_ctx, self)
-                level_managers.append(level_manager)
-                tasks_from_level = await stack.enter_async_context(level_manager)
-                active_tasks.extend(tasks_from_level)
+#         # All tasks in this execution share the same user context
+#         ctx = exec_ctx.user_context
 
-            execute_exception = None
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    for task in active_tasks:
-                        if task.execute:
-                            tg.create_task(self._execute_phase(task, "execute", exec_ctx))
-            except* Exception as eg:
-                execute_exception = eg
+#         for attempt in range(retries + 1):
+#             try:
+#                 if timeout is None:
+#                     await func(ctx)
+#                 else:
+#                     await asyncio.wait_for(func(ctx), timeout=timeout)
+#                 return  # Success
+#             except (asyncio.TimeoutError, ConnectionError) as _:
+#                 if attempt >= retries:
+#                     raise
 
-        # Collect all exceptions from pre_execute, execute, and post_execute phases
-        exceptions = [lm.pre_execute_exception for lm in level_managers if lm.pre_execute_exception]
-        if execute_exception:
-            exceptions.append(execute_exception)
+#                 # Calculate delay with exponential backoff and multiplicative jitter
+#                 # delay = initial_delay * (backoff_factor ** attempt) * uniform(0.5, 1.0)
+#                 # This gives min delay of initial_delay * 0.5 and max of initial_delay
+#                 # on first retry
+#                 delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
+#                 await asyncio.sleep(delay)
 
-        # Collect all post_execute exceptions from all levels
-        for lm in level_managers:
-            exceptions.extend(lm.post_execute_exceptions)
+#     async def process_tasks(self, ctx: T):
+#         """The main entry point to run the entire tiered workflow.
 
-        if exceptions:
-            # Raise all collected exceptions as a group
-            if len(exceptions) == 1:
-                raise exceptions[0]
-            else:
-                msg = "Multiple failures during task execution"
-                raise ExceptionGroup(msg, exceptions)
+#         Creates an isolated execution context for this run, enabling
+#         safe concurrent executions of the same processor instance.
+#         """
+#         # Create execution context for this run
+#         exec_ctx = _ExecutionContext(user_context=ctx)
+
+#         active_tasks: List[AsyncTask] = []
+#         level_managers: List[_LevelManager] = []
+
+#         async with AsyncExitStack() as stack:
+#             for level in self.sorted_levels:
+#                 level_manager = _LevelManager(level, self.tasks[level], exec_ctx, self)
+#                 level_managers.append(level_manager)
+#                 tasks_from_level = await stack.enter_async_context(level_manager)
+#                 active_tasks.extend(tasks_from_level)
+
+#             execute_exception = None
+#             try:
+#                 async with asyncio.TaskGroup() as tg:
+#                     for task in active_tasks:
+#                         if task.execute:
+#                             tg.create_task(self._execute_phase(task, "execute", exec_ctx))
+#             except* Exception as eg:
+#                 execute_exception = eg
+
+#         # Collect all exceptions from pre_execute, execute, and post_execute phases
+#         exceptions = [lm.pre_execute_exception for lm in level_managers if lm.pre_execute_exception]
+#         if execute_exception:
+#             exceptions.append(execute_exception)
+
+#         # Collect all post_execute exceptions from all levels
+#         for lm in level_managers:
+#             exceptions.extend(lm.post_execute_exceptions)
+
+#         if exceptions:
+#             # Raise all collected exceptions as a group
+#             if len(exceptions) == 1:
+#                 raise exceptions[0]
+#             else:
+#                 msg = "Multiple failures during task execution"
+#                 raise ExceptionGroup(msg, exceptions)
 
 
 @dataclass
