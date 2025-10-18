@@ -2,6 +2,20 @@
 
 ## Overview
 
+### Wave model (current analyzer implementation)
+
+The current `TaskAnalyzer` builds pre/post execution graphs as an ordered list of waves. Important clarifications for the present implementation:
+
+- A "wave" is a scheduling unit. The analyzer now groups tasks that share identical effective dependencies into the same wave by default (e.g., multiple roots with no deps share a wave). Parallelism is unchanged; grouping only affects graph shape.
+- Tasks without a given phase function (e.g., no `pre_execute`) do not form barriers for that phase and are treated as pass-through nodes when computing effective dependencies.
+- Grouping multiple tasks with identical effective dependencies into the same wave is a valid optimization, but is not performed by default in the analyzer. The tests rely on the non-coalesced representation (one task per wave) while still permitting parallel execution across waves.
+- For node semantics today, a "node" for the pre-execute graph is any task without `pre_execute`. In practice (due to `AsyncTask` validation), such a node may still define `execute` only; it still does not create a pre-execute barrier.
+
+The runtime engine can execute multiple independent waves concurrently and runs all tasks within a wave in parallel as well. Whether tasks are coalesced into the same wave or kept separate does not change correctness or achievable parallelism; it only changes the shape of the analysis graph.
+
+- Each task appears in exactly one wave.
+- A wave acts as a barrier over its `depends_on` waves: it can start only after all those predecessor waves complete. Multiple waves can depend on the same predecessor set and become ready concurrently.
+
 This document specifies a dependency-graph-based variant of sdax that allows tasks to declare explicit dependencies on other tasks by name, rather than being organized into integer levels.
 
 **Current sdax (level-based):**
@@ -479,6 +493,8 @@ Wave 1: [B, E]        # depends_on=(0,), (0,)
 Wave 2: [D]           # depends_on=(1,) - depends on B
 ```
 
+Note: The current analyzer typically emits one task per wave. Conceptually, this example shows that B and E become available after wave 0; in analyzer output they would appear as two independent waves whose dependencies both include wave 0, and they can run in parallel.
+
 With precise wave dependencies tracked, parallel execution is:
 1. Execute wave 0: [A]
 2. When wave 0 completes → execute wave 1: [B, E] **in parallel**
@@ -612,14 +628,15 @@ C -> E
 ```
 
 Waves:
-- Wave 0: [A, C] (no dependencies)
+- Wave 0: [A] (no dependencies)
+- Wave 1: [C] (no dependencies)  # Separate wave, but can run in parallel with wave 0
 - Wave 1: [B] (depends on wave 0 - specifically A)
 - Wave 2: [E] (depends on wave 0 - specifically C)
 - Wave 3: [D] (depends on wave 1)
 
 **Execution order**:
-1. Start wave 0 (A and C in parallel)
-2. When wave 0 completes → waves 1 and 2 are both ready → **execute B and E in parallel**
+1. Start waves 0 and 1 in parallel (A and C run concurrently)
+2. When wave 0 completes → wave 2 (B) may be ready; when wave 1 completes → wave 3 (E) may be ready. B and E can run in parallel when their prerequisites complete.
 3. When wave 1 completes → execute D
 
 This exploits true parallelism: B starts as soon as A finishes, without waiting for C/E!
@@ -1067,6 +1084,8 @@ def _expand_through_nodes(
 ```
 
 **Note**: Node elision is optional. It reduces overhead but adds complexity. For most use cases, the overhead of skipping nodes at runtime is negligible.
+
+Implementation note: In the current analyzer, nodes for pre-execute are simply tasks that do not define `pre_execute` (they may still define `execute` to satisfy `AsyncTask` validation). These do not create pre-execute barriers and are followed through when computing effective dependencies.
 
 ## Error Handling
 

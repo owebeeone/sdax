@@ -59,60 +59,50 @@ def get_task_wave_map(graph):
 def can_run_in_parallel(graph, task1: str, task2: str) -> bool:
     """Check if two tasks can potentially run in parallel.
 
-    Two tasks can run in parallel if:
-    1. Neither depends (transitively) on the other
-    2. Their waves have compatible dependencies
+    Two tasks can run in parallel if neither depends (transitively) on the other.
+    Uses wave.depends_on_tasks recursively to derive effective dependencies.
     """
     task_to_wave = get_task_wave_map(graph)
-
     if task1 not in task_to_wave or task2 not in task_to_wave:
         return False
 
-    wave1 = task_to_wave[task1]
-    wave2 = task_to_wave[task2]
+    def effective_deps(t: str, seen: set[str] | None = None) -> set[str]:
+        if seen is None:
+            seen = set()
+        if t in seen:
+            return set()
+        seen.add(t)
+        w = graph.waves[task_to_wave[t]]
+        deps = set(w.depends_on_tasks)
+        for d in tuple(deps):
+            deps |= effective_deps(d, seen)
+        return deps
 
-    # Find the wave objects
-    wave1_obj = next(w for w in graph.waves if w.wave_num == wave1)
-    wave2_obj = next(w for w in graph.waves if w.wave_num == wave2)
-
-    # If one wave depends on the other, they can't run in parallel
-    if wave1 in wave2_obj.depends_on or wave2 in wave1_obj.depends_on:
-        return False
-
-    return True
+    deps1 = effective_deps(task1)
+    deps2 = effective_deps(task2)
+    return (task1 not in deps2) and (task2 not in deps1)
 
 
 def verify_dependency_order(graph, task: str, dependencies: set) -> bool:
-    """Verify that a task's wave comes after all its dependencies' waves.
-
-    Args:
-        graph: The execution graph
-        task: Task name to check
-        dependencies: Set of task names that this task depends on
-
-    Returns:
-        True if task comes after all dependencies
-    """
+    """Verify that a task has all given dependencies (transitively)."""
     task_to_wave = get_task_wave_map(graph)
-
     if task not in task_to_wave:
         return False
 
-    task_wave = task_to_wave[task]
+    def effective_deps(t: str, seen: set[str] | None = None) -> set[str]:
+        if seen is None:
+            seen = set()
+        if t in seen:
+            return set()
+        seen.add(t)
+        w = graph.waves[task_to_wave[t]]
+        deps = set(w.depends_on_tasks)
+        for d in tuple(deps):
+            deps |= effective_deps(d, seen)
+        return deps
 
-    # Get wave object
-    task_wave_obj = next(w for w in graph.waves if w.wave_num == task_wave)
-
-    # Check that all dependencies are in waves that this task's wave depends on
-    for dep in dependencies:
-        if dep not in task_to_wave:
-            return False
-        dep_wave = task_to_wave[dep]
-        # The task's wave should depend on the dependency's wave (directly or transitively)
-        if dep_wave not in task_wave_obj.depends_on and dep_wave != task_wave:
-            return False
-
-    return True
+    eff = effective_deps(task)
+    return dependencies.issubset(eff)
 
 
 def format_wave_structure(graph) -> str:
@@ -122,7 +112,10 @@ def format_wave_structure(graph) -> str:
     """
     lines = []
     for wave in graph.waves:
-        deps_str = f"depends_on={wave.depends_on}" if wave.depends_on else "no deps"
+        deps = wave.depends_on_tasks
+        deps_str = (
+            f"depends_on_tasks={deps}" if deps else "no deps"
+        )
         tasks_str = ", ".join(wave.tasks)
         lines.append(f"Wave {wave.wave_num}: [{tasks_str}] ({deps_str})")
     return "\n".join(lines)
@@ -150,13 +143,13 @@ class TestBasicGraphs:
         wave_c = analysis.pre_wave_containing("C")
 
         assert wave_a is not None and wave_a.tasks == ("A",)
-        assert wave_a.depends_on == ()
+        assert wave_a.depends_on_tasks == ()
 
         assert wave_b is not None and wave_b.tasks == ("B",)
-        assert wave_a.wave_num in wave_b.depends_on
+        assert set(wave_b.depends_on_tasks) == {"A"}
 
         assert wave_c is not None and wave_c.tasks == ("C",)
-        assert wave_b.wave_num in wave_c.depends_on
+        assert set(wave_c.depends_on_tasks) == {"B"}
 
         # Post-execute: reverse order
         assert len(post_graph.waves) == 3
@@ -188,9 +181,9 @@ class TestBasicGraphs:
         assert set(task_map.keys()) == {"A", "B", "C", "D"}
 
         # Assert wave structure for visibility
-        # All tasks should be in separate waves to maximize parallelism
-        assert len(graph.waves) == 4, (
-            f"Expected 4 waves for independent chains, got {len(graph.waves)}\n"
+        # Roots (A, C) share the same effective dependencies (none) and should be grouped
+        assert len(graph.waves) == 3, (
+            f"Expected 3 waves with grouped roots, got {len(graph.waves)}\n"
             f"Actual structure:\n{format_wave_structure(graph)}"
         )
 
@@ -201,9 +194,14 @@ class TestBasicGraphs:
             f"Actual structure:\n{format_wave_structure(graph)}"
         )
 
-        # Verify dependency ordering
+        # Verify dependency ordering and grouping
         assert verify_dependency_order(graph, "B", {"A"})
         assert verify_dependency_order(graph, "D", {"C"})
+        # Wave 0 must contain both A and C (grouped roots)
+        assert set(graph.waves[0].tasks) == {"A", "C"}
+        # Wave 1 depends on A; Wave 2 depends on C (independent chains)
+        assert set(graph.waves[1].depends_on_tasks) == {"A"}
+        assert set(graph.waves[2].depends_on_tasks) == {"C"}
 
         # Key property: A and C can run in parallel (independent roots)
         assert can_run_in_parallel(graph, "A", "C")
@@ -267,7 +265,7 @@ class TestNodesAsBarriers:
         assert len(analysis.pre_execute_graph.waves) == 2
         assert analysis.pre_execute_graph.waves[0].tasks == ("A",)
         assert analysis.pre_execute_graph.waves[1].tasks == ("B",)
-        assert analysis.pre_execute_graph.waves[1].depends_on == (0,)
+        assert set(analysis.pre_execute_graph.waves[1].depends_on_tasks) == {"A"}
 
         # Post-execute graph should be empty (no tasks have post_execute)
         assert len(analysis.post_execute_graph.waves) == 0, "Post-execute graph should be empty"
@@ -540,6 +538,99 @@ class TestWaveDependencies:
         assert can_run_in_parallel(graph, "B", "D")
 
 
+class TestPostExecuteGraphs:
+    """Additional tests focused on post-execute graph structure."""
+
+    def test_post_linear_chain(self):
+        """
+        A -> B -> C (all with post)
+
+        Cleanup order: C, then B, then A (three waves, reverse depth).
+        """
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(make_task("A", has_post=True), depends_on=())
+        analyzer.add_task(make_task("B", has_post=True), depends_on=("A",))
+        analyzer.add_task(make_task("C", has_post=True), depends_on=("B",))
+
+        analysis = analyzer.analyze()
+        post_graph = analysis.post_execute_graph
+        # No pre-execute functions → no pre waves
+        assert len(analysis.pre_execute_graph.waves) == 0
+
+        assert len(post_graph.waves) == 3
+
+        wA = analysis.post_wave_containing("A")
+        wB = analysis.post_wave_containing("B")
+        wC = analysis.post_wave_containing("C")
+
+        assert wC is not None and wC.wave_num == 0 and wC.tasks == ("C",)
+        assert wB is not None and wB.wave_num == 1 and wB.tasks == ("B",)
+        assert set(wB.depends_on_tasks) == {"C"}
+        assert wA is not None and wA.wave_num == 2 and wA.tasks == ("A",)
+        assert set(wA.depends_on_tasks) == {"B"}
+
+    def test_post_two_independent_chains_three_levels(self):
+        """
+        A -> B -> D   and   C -> E -> F (all with post)
+
+        Waves:
+          0: D, F
+          1: B, E   (depends_on_tasks = {D, F})
+          2: A, C   (depends_on_tasks = {B, E})
+        """
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(make_task("A", has_post=True), depends_on=())
+        analyzer.add_task(make_task("B", has_post=True), depends_on=("A",))
+        analyzer.add_task(make_task("D", has_post=True), depends_on=("B",))
+
+        analyzer.add_task(make_task("C", has_post=True), depends_on=())
+        analyzer.add_task(make_task("E", has_post=True), depends_on=("C",))
+        analyzer.add_task(make_task("F", has_post=True), depends_on=("E",))
+
+        analysis = analyzer.analyze()
+        post_graph = analysis.post_execute_graph
+        # No pre-execute functions → no pre waves
+        assert len(analysis.pre_execute_graph.waves) == 0
+
+        assert len(post_graph.waves) == 3
+        w0 = post_graph.waves[0]
+        w1 = post_graph.waves[1]
+        w2 = post_graph.waves[2]
+
+        assert set(w0.tasks) == {"D", "F"}
+        assert w0.depends_on_tasks == ()
+        assert set(w1.tasks) == {"B", "E"}
+        assert set(w1.depends_on_tasks) == {"D", "F"}
+        assert set(w2.tasks) == {"A", "C"}
+        assert set(w2.depends_on_tasks) == {"B", "E"}
+
+    def test_post_ignores_non_post_tasks(self):
+        """
+        A (post) -> B (post) -> X (no post)
+
+        Post graph should include only A and B:
+          0: B
+          1: A (depends_on_tasks = {B})
+        """
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(make_task("A", has_post=True), depends_on=())
+        analyzer.add_task(make_task("B", has_post=True), depends_on=("A",))
+        analyzer.add_task(make_task("X", has_pre=True), depends_on=("B",))  # no post
+
+        analysis = analyzer.analyze()
+        post_graph = analysis.post_execute_graph
+        # Only X has pre in this test → exactly one pre wave containing X
+        assert len(analysis.pre_execute_graph.waves) == 1
+        assert analysis.pre_execute_graph.waves[0].tasks == ("X",)
+
+        assert len(post_graph.waves) == 2
+        w0 = post_graph.waves[0]
+        w1 = post_graph.waves[1]
+
+        assert w0.tasks == ("B",)
+        assert w0.depends_on_tasks == ()
+        assert w1.tasks == ("A",)
+        assert set(w1.depends_on_tasks) == {"B"}
 class TestErrorCases:
     """Test error handling."""
 

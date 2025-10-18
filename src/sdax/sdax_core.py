@@ -39,14 +39,6 @@ class AsyncTask:
     execute: TaskFunction | None = None
     post_execute: TaskFunction | None = None
 
-    def __post_init__(self):
-        """Validate that at least one task phase is defined."""
-        if not any([self.pre_execute, self.execute, self.post_execute]):
-            raise ValueError(
-                f"Task '{self.name}' must have at least one of: "
-                "pre_execute, execute, or post_execute"
-            )
-
 
 @dataclass
 class _ExecutionContext:

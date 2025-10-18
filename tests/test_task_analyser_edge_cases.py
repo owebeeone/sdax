@@ -53,44 +53,48 @@ def get_task_wave_map(graph):
 
 
 def can_run_in_parallel(graph, task1: str, task2: str) -> bool:
-    """Check if two tasks can potentially run in parallel."""
+    """Check if two tasks can potentially run in parallel using depends_on_tasks."""
     task_to_wave = get_task_wave_map(graph)
-
     if task1 not in task_to_wave or task2 not in task_to_wave:
         return False
 
-    wave1 = task_to_wave[task1]
-    wave2 = task_to_wave[task2]
+    def effective_deps(t: str, seen: set[str] | None = None) -> set[str]:
+        if seen is None:
+            seen = set()
+        if t in seen:
+            return set()
+        seen.add(t)
+        w = graph.waves[task_to_wave[t]]
+        deps = set(w.depends_on_tasks)
+        for d in tuple(deps):
+            deps |= effective_deps(d, seen)
+        return deps
 
-    # Find the wave objects
-    wave1_obj = next(w for w in graph.waves if w.wave_num == wave1)
-    wave2_obj = next(w for w in graph.waves if w.wave_num == wave2)
-
-    # If one wave depends on the other, they can't run in parallel
-    if wave1 in wave2_obj.depends_on or wave2 in wave1_obj.depends_on:
-        return False
-
-    return True
+    deps1 = effective_deps(task1)
+    deps2 = effective_deps(task2)
+    return (task1 not in deps2) and (task2 not in deps1)
 
 
 def verify_dependency_order(graph, task: str, dependencies: set) -> bool:
-    """Verify that a task's wave comes after all its dependencies' waves."""
+    """Verify that a task has all given dependencies (transitively)."""
     task_to_wave = get_task_wave_map(graph)
-
     if task not in task_to_wave:
         return False
 
-    task_wave = task_to_wave[task]
-    task_wave_obj = next(w for w in graph.waves if w.wave_num == task_wave)
+    def effective_deps(t: str, seen: set[str] | None = None) -> set[str]:
+        if seen is None:
+            seen = set()
+        if t in seen:
+            return set()
+        seen.add(t)
+        w = graph.waves[task_to_wave[t]]
+        deps = set(w.depends_on_tasks)
+        for d in tuple(deps):
+            deps |= effective_deps(d, seen)
+        return deps
 
-    for dep in dependencies:
-        if dep not in task_to_wave:
-            return False
-        dep_wave = task_to_wave[dep]
-        if dep_wave not in task_wave_obj.depends_on and dep_wave != task_wave:
-            return False
-
-    return True
+    eff = effective_deps(task)
+    return dependencies.issubset(eff)
 
 
 def format_wave_structure(graph) -> str:
@@ -100,7 +104,10 @@ def format_wave_structure(graph) -> str:
     """
     lines = []
     for wave in graph.waves:
-        deps_str = f"depends_on={wave.depends_on}" if wave.depends_on else "no deps"
+        deps = wave.depends_on_tasks
+        deps_str = (
+            f"depends_on_tasks={deps}" if deps else "no deps"
+        )
         tasks_str = ", ".join(wave.tasks)
         lines.append(f"Wave {wave.wave_num}: [{tasks_str}] ({deps_str})")
     return "\n".join(lines)
@@ -178,13 +185,13 @@ class TestPostExecuteGraphEdgeCases:
         assert wave_b is not None and wave_d is not None
         assert wave_b.wave_num == wave_d.wave_num, "B and D should be in the same wave"
         assert set(wave_b.tasks) == {"B", "D"}
-        assert wave_b.depends_on == ()
+        assert wave_b.depends_on_tasks == ()
 
-        # A and C depend on B/D's wave
+        # A and C depend on B/D's wave (via depends_on_tasks)
         assert wave_a is not None and wave_c is not None
         assert wave_a.wave_num == wave_c.wave_num, "A and C should be in the same wave"
         assert set(wave_a.tasks) == {"A", "C"}
-        assert wave_b.wave_num in wave_a.depends_on
+        assert set(wave_a.depends_on_tasks) == {"B", "D"}
 
 
 class TestNodeEdgeCases:
@@ -204,8 +211,9 @@ class TestNodeEdgeCases:
         # but don't create barriers in pre/post phases
         assert len(analysis.pre_execute_graph.waves) == 0
         assert len(analysis.post_execute_graph.waves) == 0
-        # Nodes are tasks with only execute (minimal overhead)
-        assert analysis.nodes == 0  # No true "nodes" (all have execute for validation)
+        # Nodes count represents truly functionless tasks (conceptual nodes)
+        # With AsyncTask validation, this should be zero
+        assert analysis.nodes == 0
         assert analysis.tasks_with_execute == 3  # But all 3 are execute-only
 
     def test_node_with_only_post_execute(self):
@@ -351,7 +359,7 @@ class TestComplexDependencies:
         # Key properties
         # B and C can run in parallel (both depend on A)
         assert can_run_in_parallel(graph, "B", "C")
-        # B and D can run in parallel (independent chains)
+        # B and D are in independent chains -> they can run in parallel
         assert can_run_in_parallel(graph, "B", "D")
 
 
