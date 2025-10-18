@@ -257,6 +257,45 @@ class TestNodeEdgeCases:
         # Verify cleanup order: B -> N -> A
         assert post_wave_b.wave_num < post_wave_n.wave_num < post_wave_a.wave_num
 
+    def test_multiple_tasks_with_no_functions(self):
+        """Graph with tasks that truly have no functions (do-nothing nodes)."""
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(AsyncTask(name="A"), depends_on=())
+        analyzer.add_task(AsyncTask(name="B"), depends_on=("A",))
+        analyzer.add_task(AsyncTask(name="C"), depends_on=("B",))
+
+        analysis = analyzer.analyze()
+
+        # No pre/post waves
+        assert len(analysis.pre_execute_graph.waves) == 0
+        assert len(analysis.post_execute_graph.waves) == 0
+
+        # Stats reflect true nodes
+        assert analysis.total_tasks == 3
+        assert analysis.tasks_with_pre_execute == 0
+        assert analysis.tasks_with_execute == 0
+        assert analysis.tasks_with_post_execute == 0
+        assert analysis.nodes == 3
+
+    def test_single_execute_only_task(self):
+        """Single task with only execute should not appear in pre/post graphs."""
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(
+            AsyncTask(name="X", execute=TaskFunction(function=dummy_func)), depends_on=()
+        )
+
+        analysis = analyzer.analyze()
+
+        assert len(analysis.pre_execute_graph.waves) == 0
+        assert len(analysis.post_execute_graph.waves) == 0
+        assert analysis.total_tasks == 1
+        assert analysis.tasks_with_pre_execute == 0
+        assert analysis.tasks_with_execute == 1
+        assert analysis.tasks_with_post_execute == 0
+        assert analysis.nodes == 0
+        # Verify the execute-only task is X (using precomputed names)
+        assert analysis.execute_task_names == ("X",)
+
 
 class TestComplexDependencies:
     """Test complex dependency patterns."""

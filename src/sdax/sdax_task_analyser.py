@@ -80,6 +80,10 @@ class TaskAnalysis:
     post_wave_index_by_task: Dict[str, int]
     post_task_to_consumer_waves: Dict[str, Tuple[int, ...]]
     post_wave_dep_count: Tuple[int, ...]
+    # Precomputed task name lists per phase
+    pre_task_names: Tuple[str, ...]
+    execute_task_names: Tuple[str, ...]
+    post_task_names: Tuple[str, ...]
 
     # Statistics
     total_tasks: int
@@ -184,6 +188,11 @@ class TaskAnalyzer:
         # Compute statistics
         stats = self._compute_statistics()
 
+        # Precompute task name lists per phase
+        pre_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.pre_execute is not None))
+        execute_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.execute is not None))
+        post_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.post_execute is not None))
+
         return TaskAnalysis(
             tasks=dict(self.tasks),
             dependencies=dict(self.dependencies),
@@ -195,6 +204,9 @@ class TaskAnalyzer:
             post_wave_index_by_task=getattr(self, "_post_wave_index_by_task", {}),
             post_task_to_consumer_waves=getattr(self, "_post_task_to_consumer_waves", {}),
             post_wave_dep_count=getattr(self, "_post_wave_dep_count", ()),
+            pre_task_names=pre_task_names,
+            execute_task_names=execute_task_names,
+            post_task_names=post_task_names,
             **stats,
         )
 
