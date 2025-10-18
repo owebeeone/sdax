@@ -11,7 +11,8 @@ Wave construction exploits:
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Generic, List, Set, Tuple
+from typing_extensions import TypeVar
 
 from sdax.tasks import AsyncTask
 
@@ -62,9 +63,10 @@ class ExecutionGraph:
             lines.append(f"  {wave}")
         return "\n".join(lines)
 
+T = TypeVar("T")
 
 @dataclass(frozen=True)
-class TaskAnalysis:
+class TaskAnalysis(Generic[T]):
     """Complete analysis of a task dependency graph."""
 
     tasks: Dict[str, AsyncTask]

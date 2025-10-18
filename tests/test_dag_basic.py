@@ -49,8 +49,7 @@ class TestDagBasic(unittest.TestCase):
             analyzer = TaskAnalyzer()
             analysis = analyzer.analyze()
             proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
-            with self.assertRaises(NotImplementedError):
-                await proc.process_tasks(ctx=None)
+            await proc.process_tasks(ctx=None)
 
         asyncio.run(run())
 
@@ -168,8 +167,7 @@ class TestDagBasic(unittest.TestCase):
             analysis = analyzer.analyze()
             proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
             ctx = Ctx()
-            with self.assertRaises(NotImplementedError):
-                await proc.process_tasks(ctx=ctx)
+            await proc.process_tasks(ctx=ctx)
 
             # As-if assertions (when implemented)
             with self.subTest("expected_when_implemented"):
