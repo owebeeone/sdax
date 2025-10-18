@@ -16,13 +16,14 @@ It is ideal for building the internal logic of a single, fast operation, such as
 
 ## Key Features
 
-- **Immutable Builder Pattern**: Build processors using a fluent builder API that produces immutable, reusable processor instances.
-- **Structured Lifecycle**: Enforces a rigid `pre-execute` -> `execute` -> `post-execute` lifecycle for all tasks.
-- **Tiered Parallel Execution**: Tasks are grouped into integer "levels." All tasks at a given level are executed in parallel, and the framework ensures all tasks at level `N` complete successfully before level `N+1` begins.
-- **Guaranteed Cleanup**: `post-execute` runs for **any task whose `pre-execute` was started**, regardless of whether it succeeded, failed, or was cancelled. This ensures resources are always released.
-- **Concurrent Execution Safe**: Multiple concurrent executions of the same processor instance are fully isolated, perfect for high-throughput API endpoints.
-- **Declarative & Flexible**: Define tasks and task functions as frozen dataclasses. Methods for each phase are optional, and each can have its own timeout and retry configuration.
-- **Lightweight**: Runs directly inside your application's event loop with minimal dependencies (datatrees, frozendict), with minimal overhead (see Performance section for details).
+- **Graph-based scheduler (DAG)**: Primary execution model is a task dependency graph (directed acyclic graph). Tasks depend on other tasks by name; the analyzer groups tasks into parallelizable waves.
+- **Elevator adapter (levels)**: A level-based API is provided as an adapter that builds a graph under the hood to simulate the classic "elevator" model.
+- **Structured Lifecycle**: Rigid `pre-execute` -> `execute` -> `post-execute` lifecycle for all tasks.
+- **Guaranteed Cleanup**: `post-execute` runs for any task whose `pre-execute` started (even if failed/cancelled) to ensure resources are released.
+- **Immutable Builder Pattern**: Build processors via fluent APIs producing immutable, reusable instances.
+- **Concurrent Execution Safe**: Multiple concurrent runs are fully isolated.
+- **Declarative & Flexible**: Task functions are frozen dataclasses with optional timeouts/retries and independent per-phase configuration.
+- **Lightweight**: Minimal dependencies, minimal overhead (see Performance).
 
 ## Installation
 
@@ -39,84 +40,57 @@ pip install -e .
 
 ## Quick Start
 
+Graph-based (task dependency graph):
+
 ```python
 import asyncio
 from dataclasses import dataclass
-from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction
+from sdax import AsyncTask, TaskFunction
+from sdax.sdax_task_analyser import TaskAnalyzer
+from sdax.sdax_core import AsyncDagTaskProcessor
 
-# 1. Define your context class with typed fields
 @dataclass
 class TaskContext:
     user_id: int | None = None
     feature_flags: dict | None = None
-    db_connection = None
 
-# 2. Define your task functions
 async def check_auth(ctx: TaskContext):
-    print("Level 1: Checking authentication...")
     await asyncio.sleep(0.1)
     ctx.user_id = 123
-    print("Auth successful.")
 
 async def load_feature_flags(ctx: TaskContext):
-    print("Level 1: Loading feature flags...")
     await asyncio.sleep(0.2)
     ctx.feature_flags = {"new_api": True}
-    print("Flags loaded.")
 
 async def fetch_user_data(ctx: TaskContext):
-    print("Level 2: Fetching user data...")
     if not ctx.user_id:
-        raise ValueError("Auth failed, cannot fetch user data.")
+        raise ValueError("Auth failed")
     await asyncio.sleep(0.1)
-    print("User data fetched.")
 
-async def close_db_connection(ctx: TaskContext):
-    print("Tearing down db connection...")
-    await asyncio.sleep(0.05)
-    print("Connection closed.")
+analyzer = TaskAnalyzer()
+analyzer.add_task(AsyncTask(name="Auth", pre_execute=TaskFunction(check_auth)), depends_on=())
+analyzer.add_task(AsyncTask(name="Flags", pre_execute=TaskFunction(load_feature_flags)), depends_on=())
+analyzer.add_task(AsyncTask(name="Fetch", execute=TaskFunction(fetch_user_data)), depends_on=("Auth",))
 
-async def main():
-    # 3. Create your context
-    ctx = TaskContext()
+analysis = analyzer.analyze()
+processor = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
 
-    # 4. Build an immutable processor with declarative workflow
-    processor = (
-        AsyncTaskProcessor.builder()
-        .add_task(
-            level=1,
-            task=AsyncTask(
-                name="Authentication",
-                pre_execute=TaskFunction(function=check_auth),
-                post_execute=TaskFunction(function=close_db_connection)
-            )
-        )
-        .add_task(
-            level=1,
-            task=AsyncTask(
-                name="FeatureFlags",
-                pre_execute=TaskFunction(function=load_feature_flags)
-            )
-        )
-        .add_task(
-            level=2,
-            task=AsyncTask(
-                name="UserData",
-                execute=TaskFunction(function=fetch_user_data)
-            )
-        )
-        .build()
-    )
+# await processor.process_tasks(TaskContext())
+```
 
-    # 5. Run the processor (can be reused for multiple concurrent executions)
-    try:
-        await processor.process_tasks(ctx)
-        print("\nWorkflow completed successfully!")
-    except* Exception as e:
-        print(f"\nWorkflow failed: {e.exceptions[0]}")
+Elevator adapter (level-based API; builds a graph under the hood):
 
-if __name__ == "__main__":
-    asyncio.run(main())
+```python
+from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction
+
+processor = (
+    AsyncTaskProcessor.builder()
+    .add_task(AsyncTask("Auth", pre_execute=TaskFunction(check_auth)), level=1)
+    .add_task(AsyncTask("Flags", pre_execute=TaskFunction(load_feature_flags)), level=1)
+    .add_task(AsyncTask("Fetch", execute=TaskFunction(fetch_user_data)), level=2)
+    .build()
+)
+# await processor.process_tasks(TaskContext())
 ```
 
 ## Important: Cleanup Guarantees & Resource Management
@@ -202,7 +176,7 @@ Failure semantics:
 - **If any `post_execute` fails**: siblings are not cancelled; all eligible cleanup still runs; exceptions are aggregated.
 - The final error is an `ExceptionGroup` that may include failures from pre, execute, and post.
 
-### The "Elevator" Pattern
+### The "Elevator" Pattern (level adapter)
 
 Tasks execute in a strict "elevator up, elevator down" pattern:
 
@@ -236,31 +210,24 @@ Each task can define up to 3 optional phases:
 
 ## Performance
 
-**Benchmarks** (single-threaded, zero-work tasks):
+**Benchmarks** (1,000 zero-work tasks):
 
-| Python Version | Multi-level | Single Large Level | Framework Overhead |
-|----------------|-------------|--------------------|--------------------|
-| **Python 3.13** | ~137,000 tasks/sec | ~21,500 tasks/sec | ~7µs per task |
-| **Python 3.11** | ~15,000 tasks/sec | ~159 tasks/sec | ~67µs per task |
+| Python | Raw asyncio (ms) | Single level (ms) | Multi level (ms) | Three phases (ms) |
+|--------|-------------------|-------------------|------------------|-------------------|
+| 3.14rc | 4.74 | 7.63 | 9.87 | 32.12 |
+| 3.13   | 5.75 | 9.44 | 7.09 | 32.37 |
+| 3.11   | 7.53 | 17.01 | 15.29 | 61.21 |
 
-*Python 3.13 has significantly improved asyncio performance compared to 3.11. Benchmarks show 9x better throughput in many scenarios.*
-
-**Key Observations**:
-- **Multi-level execution**: ~79% of raw asyncio performance (Python 3.13)
-- **Scalability**: Tested with 1,000+ tasks across 100 levels
-- **Real-world performance**: For typical I/O-bound tasks (10ms+), framework overhead is <0.1% and negligible
+Notes:
+- Absolute numbers vary by machine; relative ordering is consistent across runs.
+- 3.13+ shows substantial asyncio improvements vs 3.11.
+- Overhead remains small vs realistic I/O-bound tasks (10ms+ per op).
 
 **When to use**:
 - ✅ I/O-bound workflows (database, HTTP, file operations)
 - ✅ Complex multi-step operations with dependencies
-- ✅ Multiple levels with reasonable task counts (5-50 tasks/level)
+- ✅ Multiple levels with reasonable task counts (3 or more tasks/level)
 - ✅ Tasks where guaranteed cleanup is critical
-
-**When NOT to use**:
-- ❌ CPU-bound work (use `ProcessPoolExecutor` instead)
-- ❌ Single level with 100+ parallel tasks (use raw `asyncio.TaskGroup`)
-- ❌ Simple linear async/await (unnecessary overhead)
-- ❌ Ultra high-frequency operations (>100k ops/sec needed)
 
 ## Use Cases
 
