@@ -631,6 +631,46 @@ class TestPostExecuteGraphs:
         assert w0.depends_on_tasks == ()
         assert w1.tasks == ("A",)
         assert set(w1.depends_on_tasks) == {"B"}
+
+    def test_mixed_chain_post_follow_through_nodes(self):
+        """
+        Chain: A -> B -> C -> D -> E
+
+        Phases:
+          A: pre only
+          B: post only
+          C: pre only
+          D: post only
+          E: pre only
+
+        Expectations:
+          - Pre waves: only tasks with pre -> A, C, E (grouped by deps).
+          - Post waves: only tasks with post -> D then B (D wave 0, B wave 1),
+            because B depends (transitively) on D via C.
+        """
+        analyzer = TaskAnalyzer()
+        analyzer.add_task(make_task("A", has_pre=True), depends_on=())
+        analyzer.add_task(make_task("B", has_post=True), depends_on=("A",))
+        analyzer.add_task(make_task("C", has_pre=True), depends_on=("B",))
+        analyzer.add_task(make_task("D", has_post=True), depends_on=("C",))
+        analyzer.add_task(make_task("E", has_pre=True), depends_on=("D",))
+
+        analysis = analyzer.analyze()
+
+        # Pre graph contains only A, C, E
+        pre_graph = analysis.pre_execute_graph
+        pre_tasks = {t for w in pre_graph.waves for t in w.tasks}
+        assert pre_tasks == {"A", "C", "E"}
+
+        # Post graph contains only D then B (reverse order, follow-through non-post nodes)
+        post_graph = analysis.post_execute_graph
+        assert len(post_graph.waves) == 2
+        w0 = post_graph.waves[0]
+        w1 = post_graph.waves[1]
+        assert w0.tasks == ("D",)
+        assert w0.depends_on_tasks == ()
+        assert w1.tasks == ("B",)
+        assert set(w1.depends_on_tasks) == {"D"}
 class TestErrorCases:
     """Test error handling."""
 

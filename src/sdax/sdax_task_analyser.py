@@ -401,7 +401,53 @@ class TaskAnalyzer:
             for dep in deps:
                 dependents[dep].append(task)
 
-        # Compute reverse wave assignments (group by reverse depth, not by exact dependent sets)
+        # Helper: effective post dependents (follow through non-post nodes)
+        eff_post_dep_cache: Dict[str, Set[str]] = {}
+
+        def get_effective_post_dependents(task_name: str, visited: Set[str] | None = None) -> Set[str]:
+            if visited is None:
+                visited = set()
+            if task_name in eff_post_dep_cache:
+                return eff_post_dep_cache[task_name]
+            if task_name in visited:
+                return set()
+            visited.add(task_name)
+
+            effective: Set[str] = set()
+            for d in dependents.get(task_name, []):
+                if d in post_exec_tasks:
+                    effective.add(d)
+                # Always traverse further to catch post tasks beyond non-post nodes
+                effective |= get_effective_post_dependents(d, visited)
+
+            eff_post_dep_cache[task_name] = effective
+            return effective
+
+        # Helper: nearest post dependents (first post tasks reachable via any path)
+        nearest_post_dep_cache: Dict[str, Set[str]] = {}
+
+        def get_nearest_post_dependents(task_name: str, visited: Set[str] | None = None) -> Set[str]:
+            if visited is None:
+                visited = set()
+            if task_name in nearest_post_dep_cache:
+                return nearest_post_dep_cache[task_name]
+            if task_name in visited:
+                return set()
+            visited.add(task_name)
+
+            nearest: Set[str] = set()
+            for d in dependents.get(task_name, []):
+                if d in post_exec_tasks:
+                    # First post task on this path → include and do not traverse past it
+                    nearest.add(d)
+                else:
+                    # Not a post task → continue searching
+                    nearest |= get_nearest_post_dependents(d, visited)
+
+            nearest_post_dep_cache[task_name] = nearest
+            return nearest
+
+        # Compute reverse wave assignments (by reverse depth over effective post dependents)
         task_wave = {}
         waves_dict = defaultdict(list)
         wave_depends_on_tasks: Dict[int, Tuple[str, ...]] = {}
@@ -413,29 +459,25 @@ class TaskAnalyzer:
             if task_name not in post_exec_tasks:
                 continue  # Skip tasks without post_execute
 
-            # Direct dependents with post_execute (who must clean first)
-            direct_deps = tuple(
-                sorted(d for d in dependents.get(task_name, []) if d in post_exec_tasks)
-            )
+            # Effective dependents with post_execute (follow through non-post nodes)
+            effective_deps = tuple(sorted(get_effective_post_dependents(task_name)))
+            # Nearest post dependents (stop at first post along each path)
+            nearest_post_deps = tuple(sorted(get_nearest_post_dependents(task_name)))
 
             # Compute reverse wave number based on already-assigned dependents
-            dependent_waves = [
-                task_wave[d]
-                for d in dependents.get(task_name, [])
-                if d in task_wave
-            ]
+            dependent_waves = [task_wave[d] for d in effective_deps if d in task_wave]
             min_wave = 0 if not dependent_waves else (max(dependent_waves) + 1)
 
             wave = min_wave
             task_wave[task_name] = wave
             waves_dict[wave].append(task_name)
-            # Union depends_on_tasks across tasks assigned to the same wave
+            # Union depends_on_tasks across tasks assigned to the same wave (nearest-only)
             if wave in wave_depends_on_tasks:
                 prev = set(wave_depends_on_tasks[wave])
-                merged = tuple(sorted(prev.union(direct_deps)))
+                merged = tuple(sorted(prev.union(nearest_post_deps)))
                 wave_depends_on_tasks[wave] = merged
             else:
-                wave_depends_on_tasks[wave] = direct_deps
+                wave_depends_on_tasks[wave] = nearest_post_deps
 
         # Convert to ExecutionWave objects
         waves = []
