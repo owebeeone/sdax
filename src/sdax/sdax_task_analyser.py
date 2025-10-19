@@ -1,12 +1,17 @@
-"""Task Dependency Analyzer for SDAX DAG Mode.
+"""Task dependency graph analyzer for sdax.
 
-This module analyzes task dependency graphs and constructs execution waves
-for optimal parallel execution.
+Builds immutable "waves" (start barriers) from a named‑task dependency graph:
+- Pre‑execute: group tasks that share the same effective predecessors. Waves are
+  start barriers only and do not introduce wave→wave dependencies.
+- Execute: not wave‑driven; runs across all tasks whose pre succeeded.
+- Post‑execute: construct reverse waves using nearest post dependents so
+  dependents clean up before their prerequisites.
 
-Wave construction exploits:
-1. Independent chains (parallel execution when possible)
-2. Nodes (tasks with no functions don't create sync barriers)
-3. Precise wave dependencies (not just "all earlier waves")
+Design goals:
+- Correctness and ergonomics first (uniform lifecycle, deterministic cleanup),
+  not micro‑optimizations.
+- Analyzer validates missing dependencies and detects cycles at build time.
+- Output is immutable and safe to reuse across concurrent executions.
 """
 
 from collections import defaultdict, deque
@@ -39,7 +44,10 @@ class ExecutionWave:
 
 @dataclass(frozen=True)
 class ExecutionGraph:
-    """Complete execution graph with waves."""
+    """Complete execution graph with waves (start barriers).
+
+    Waves group tasks by identical effective predecessors for a given phase.
+    """
 
     waves: Tuple[ExecutionWave, ...]
 
@@ -136,7 +144,14 @@ class TaskAnalysis(Generic[T]):
 
 
 class TaskAnalyzer:
-    """Analyzes task dependency graphs and constructs execution waves."""
+    """Builds wave schedules from a task dependency graph.
+
+    Responsibilities:
+    - Validate references and detect cycles.
+    - Pre phase: group tasks by identical effective predecessors (through nodes).
+    - Post phase: order cleanup by nearest post dependents (dependents before deps).
+    - Provide immutable analysis + convenience metadata for the runtime.
+    """
 
     def __init__(self):
         self.tasks: Dict[str, AsyncTask] = {}
