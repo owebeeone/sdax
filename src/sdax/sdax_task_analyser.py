@@ -15,9 +15,8 @@ Design goals:
 """
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from typing import Dict, Generic, List, Set, Tuple
-from typing_extensions import TypeVar
+from dataclasses import dataclass, field
+from typing import Dict, Generic, List, Set, Tuple, TypeVar
 
 from sdax.tasks import AsyncTask
 
@@ -101,6 +100,8 @@ class TaskAnalysis(Generic[T]):
     tasks_with_execute: int
     tasks_with_post_execute: int
     nodes: int  # Tasks with no functions
+    max_pre_wave_num: int
+    max_post_wave_num: int
 
     def pre_wave_containing(self, task_name: str) -> ExecutionWave | None:
         """Find the pre-execute wave that contains the given task.
@@ -143,6 +144,7 @@ class TaskAnalysis(Generic[T]):
         return "\n".join(lines)
 
 
+@dataclass
 class TaskAnalyzer:
     """Builds wave schedules from a task dependency graph.
 
@@ -153,13 +155,12 @@ class TaskAnalyzer:
     - Provide immutable analysis + convenience metadata for the runtime.
     """
 
-    def __init__(self):
-        self.tasks: Dict[str, AsyncTask] = {}
-        self.dependencies: Dict[str, Tuple[str, ...]] = {}
-        # Pre-exec metadata storage for analyze() output
-        self._pre_wave_index_by_task: Dict[str, int] = {}
-        self._pre_task_to_consumer_waves: Dict[str, Tuple[int, ...]] = {}
-        self._pre_wave_dep_count: Dict[int, int] = {}
+    tasks: Dict[str, AsyncTask] = field(default_factory=dict)
+    dependencies: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Pre-exec metadata storage for analyze() output
+    _pre_wave_index_by_task: Dict[str, int] = field(default_factory=dict)
+    _pre_task_to_consumer_waves: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
+    _pre_wave_dep_count: Dict[int, int] = field(default_factory=dict)
 
     def add_task(
         self,
@@ -225,6 +226,8 @@ class TaskAnalyzer:
             execute_task_names=execute_task_names,
             post_task_names=post_task_names,
             **stats,
+            max_pre_wave_num=len(pre_exec_graph.waves),
+            max_post_wave_num=len(post_exec_graph.waves),
         )
 
     def _validate_dependencies(self):

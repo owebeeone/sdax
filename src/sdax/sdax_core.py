@@ -3,21 +3,19 @@ SDAX core engine classes.
 
 This module contains the core engine classes for the SDAX framework.
 """
-from abc import ABC, abstractmethod
+
 import asyncio
 import random
+from abc import ABC, abstractmethod
 from collections import defaultdict
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Dict, Generic, List, TypeVar
+from typing import Any, Awaitable, Dict, Generic, List, TypeVar
 
-from datatrees import datatree, dtfield
-from frozendict import frozendict
 from sdax.sdax_task_analyser import TaskAnalysis, TaskAnalyzer
-from sdax.tasks import AsyncTask, TaskFunction
-
+from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
 
 T = TypeVar("T")
+
 
 @dataclass
 class _ExecutionContext(Generic[T]):
@@ -67,7 +65,16 @@ class AsyncDagTaskProcessorBuilder(Generic[T]):
         return AsyncDagTaskProcessor(analysis=self.analysis)
 
 
-@datatree(frozen=True)
+@dataclass(frozen=True)
+class _TaskGroupWrapper(SdaxTaskGroup):
+    task_group: asyncio.TaskGroup
+
+    def create_task(
+        self, coro: Awaitable[Any], *, name: str | None = None, context: Any | None = None):
+        return self.task_group.create_task(coro, name=name, context=context)
+
+
+@dataclass(frozen=True)
 class AsyncDagTaskProcessor(Generic[T]):
     """Immutable DAG executor that consumes TaskAnalysis graphs.
 
@@ -97,36 +104,37 @@ class AsyncDagTaskProcessor(Generic[T]):
 
         pre_waves = analysis.pre_execute_graph.waves
         # completed_count indexed by wave_num
-        pre_completed_count: Dict[int, int] = {w.wave_num: 0 for w in pre_waves}
+        pre_completed_count: List[int] = [0] * (analysis.max_pre_wave_num + 1)
         pre_dep_target = analysis.wave_dep_count
         scheduled_waves: set[int] = set()
 
-        async def run_pre(task_name: str):
+        async def run_pre(task_name: str, tg_wrapper: _TaskGroupWrapper):
             task = tasks_by_name[task_name]
             pre_started.add(task_name)
-            await self._execute_phase(task, "pre_execute", exec_ctx)
+            await self._execute_with_retry(task.pre_execute, exec_ctx, tg_wrapper)
             pre_succeeded.add(task_name)
             # Increment consumer waves and schedule newly ready waves
             for widx in analysis.task_to_consumer_waves.get(task_name, ()):  # type: ignore[attr-defined]
-                pre_completed_count[widx] = pre_completed_count.get(widx, 0) + 1
+                pre_completed_count[widx] += 1
                 if pre_completed_count[widx] >= pre_dep_target[widx]:
                     await schedule_wave(widx)
 
         # schedule_wave needs access to tg; define placeholder and bind later
-        tg_ref: Dict[str, asyncio.TaskGroup] = {}
+        tg_ref: Dict[str, _TaskGroupWrapper] = {}
 
         async def schedule_wave(wave_idx: int):
             if wave_idx in scheduled_waves:
                 return
             scheduled_waves.add(wave_idx)
             wave = pre_waves[wave_idx]
+            tg_wrapper = tg_ref["tg"]
             for name in wave.tasks:
-                tg_ref["tg"].create_task(run_pre(name))
+                tg_wrapper.create_task(run_pre(name, tg_wrapper))
 
         if pre_waves:
             try:
                 async with asyncio.TaskGroup() as tg:
-                    tg_ref["tg"] = tg
+                    tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
                     # Seed root waves (dep count == 0)
                     for w in pre_waves:
                         if analysis.wave_dep_count[w.wave_num] == 0:
@@ -147,8 +155,11 @@ class AsyncDagTaskProcessor(Generic[T]):
         if exec_to_run:
             try:
                 async with asyncio.TaskGroup() as tg:
+                    tg_wrapper = _TaskGroupWrapper(task_group=tg)
                     for name in exec_to_run:
-                        tg.create_task(self._execute_phase(tasks_by_name[name], "execute", exec_ctx))
+                        tg.create_task(
+                            self._execute_with_retry(
+                                tasks_by_name[name].execute, exec_ctx, tg_wrapper))
             except* Exception as eg:
                 exec_exception = eg
 
@@ -161,7 +172,8 @@ class AsyncDagTaskProcessor(Generic[T]):
                 return None
             try:
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(self._execute_phase(task, "post_execute", exec_ctx))
+                    tg_wrapper = _TaskGroupWrapper(task_group=tg)
+                    tg.create_task(self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
             except ExceptionGroup as eg:
                 return eg
             return None
@@ -197,11 +209,13 @@ class AsyncDagTaskProcessor(Generic[T]):
                 raise exceptions[0]
             raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
 
-    async def _execute_phase(self, task: AsyncTask[T], phase: str, exec_ctx: _ExecutionContext[T]):
-        task_func_obj = getattr(task, phase)
+    async def _execute_with_retry(
+        self,
+        task_func_obj: TaskFunction[T],
+        exec_ctx: _ExecutionContext[T],
+        tg_wrapper: _TaskGroupWrapper):
         if not task_func_obj:
             return
-        func = task_func_obj.function
         retries = task_func_obj.retries
         timeout = task_func_obj.timeout
         initial_delay = task_func_obj.initial_delay
@@ -210,9 +224,9 @@ class AsyncDagTaskProcessor(Generic[T]):
         for attempt in range(retries + 1):
             try:
                 if timeout is None:
-                    await func(ctx)
+                    await task_func_obj.call(ctx, tg_wrapper)
                 else:
-                    await asyncio.wait_for(func(ctx), timeout=timeout)
+                    await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
                 return
             except (asyncio.TimeoutError, ConnectionError) as _:
                 if attempt >= retries:
