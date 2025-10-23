@@ -9,9 +9,9 @@ import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Dict, Generic, List, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, TypeVar
 
-from sdax.sdax_task_analyser import TaskAnalysis, TaskAnalyzer
+from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
 from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
 
 T = TypeVar("T")
@@ -103,42 +103,27 @@ class AsyncDagTaskProcessor(Generic[T]):
         pre_exception: BaseException | None = None
 
         pre_waves = analysis.pre_execute_graph.waves
-        # completed_count indexed by wave_num
-        pre_completed_count: List[int] = [0] * (analysis.max_pre_wave_num + 1)
-        pre_dep_target = analysis.wave_dep_count
-        scheduled_waves: set[int] = set()
+
+        def pre_should_run(name: str) -> bool:
+            return tasks_by_name[name].pre_execute is not None
 
         async def run_pre(task_name: str, tg_wrapper: _TaskGroupWrapper):
             task = tasks_by_name[task_name]
             pre_started.add(task_name)
             await self._execute_with_retry(task.pre_execute, exec_ctx, tg_wrapper)
             pre_succeeded.add(task_name)
-            # Increment consumer waves and schedule newly ready waves
-            for widx in analysis.task_to_consumer_waves.get(task_name, ()):  # type: ignore[attr-defined]
-                pre_completed_count[widx] += 1
-                if pre_completed_count[widx] >= pre_dep_target[widx]:
-                    await schedule_wave(widx)
-
-        # schedule_wave needs access to tg; define placeholder and bind later
-        tg_ref: Dict[str, _TaskGroupWrapper] = {}
-
-        async def schedule_wave(wave_idx: int):
-            if wave_idx in scheduled_waves:
-                return
-            scheduled_waves.add(wave_idx)
-            wave = pre_waves[wave_idx]
-            tg_wrapper = tg_ref["tg"]
-            for name in wave.tasks:
-                tg_wrapper.create_task(run_pre(name, tg_wrapper))
 
         if pre_waves:
             try:
-                async with asyncio.TaskGroup() as tg:
-                    tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
-                    # Seed root waves (dep count == 0)
-                    for w in pre_waves:
-                        if analysis.wave_dep_count[w.wave_num] == 0:
-                            await schedule_wave(w.wave_num)
+                await self._run_wave_phase(
+                    waves=pre_waves,
+                    wave_dep_count=analysis.wave_dep_count,
+                    task_to_consumer_waves=analysis.task_to_consumer_waves,
+                    should_run=pre_should_run,
+                    run_task=run_pre,
+                    propagate_exceptions=True,
+                    complete_on_error=False,
+                )
             except* Exception as eg:
                 pre_exception = eg
 
@@ -178,24 +163,32 @@ class AsyncDagTaskProcessor(Generic[T]):
                 return eg
             return None
 
+        def post_should_run(name: str) -> bool:
+            task = tasks_by_name[name]
+            if task.post_execute is None:
+                return False
+            if task.pre_execute is None:
+                return True
+            return name in pre_started
+
+        async def run_post(name: str, tg_wrapper: _TaskGroupWrapper):
+            task = tasks_by_name[name]
+            result = await run_post_isolated(task)
+            if isinstance(result, BaseException):
+                raise result
+
         if post_waves:
-            for wave in post_waves:
-                # Determine eligibility: started pre or no pre
-                eligible: list[AsyncTask[T]] = []
-                for name in wave.tasks:
-                    t = tasks_by_name[name]
-                    if t.post_execute is None:
-                        continue
-                    if t.pre_execute is None or name in pre_started:
-                        eligible.append(t)
-                if not eligible:
-                    continue
-                results = await asyncio.gather(
-                    *[run_post_isolated(t) for t in eligible], return_exceptions=True
+            post_exceptions.extend(
+                await self._run_wave_phase(
+                    waves=post_waves,
+                    wave_dep_count=analysis.post_wave_dep_count,
+                    task_to_consumer_waves=analysis.post_task_to_consumer_waves,
+                    should_run=post_should_run,
+                    run_task=run_post,
+                    propagate_exceptions=False,
+                    complete_on_error=True,
                 )
-                for res in results:
-                    if isinstance(res, BaseException):
-                        post_exceptions.append(res)
+            )
 
         # -------- Aggregate exceptions --------
         exceptions: list[BaseException] = []
@@ -233,6 +226,83 @@ class AsyncDagTaskProcessor(Generic[T]):
                     raise
                 delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
                 await asyncio.sleep(delay)
+
+    async def _run_wave_phase(
+        self,
+        *,
+        waves: Sequence[ExecutionWave],
+        wave_dep_count: Sequence[int],
+        task_to_consumer_waves: Mapping[str, Sequence[int]],
+        should_run: Callable[[str], bool],
+        run_task: Callable[[str, _TaskGroupWrapper], Awaitable[None]],
+        propagate_exceptions: bool,
+        complete_on_error: bool,
+    ) -> list[BaseException]:
+        """Generic wave executor used for both pre and post phases."""
+        if not waves:
+            return []
+
+        wave_lookup: Dict[int, ExecutionWave] = {wave.wave_num: wave for wave in waves}
+        max_wave_index = max(wave_lookup) + 1 if wave_lookup else 0
+
+        targets = list(wave_dep_count)
+        if len(targets) < max_wave_index:
+            targets.extend([0] * (max_wave_index - len(targets)))
+        completed = [0] * len(targets)
+
+        scheduled: set[int] = set()
+        exceptions: list[BaseException] = []
+        tg_ref: Dict[str, _TaskGroupWrapper] = {}
+
+        async def schedule_wave(idx: int):
+            if idx in scheduled:
+                return
+            scheduled.add(idx)
+            wave = wave_lookup.get(idx)
+            if wave is None:
+                return
+
+            has_runnable = False
+            for task_name in wave.tasks:
+                if not should_run(task_name):
+                    await on_task_complete(task_name)
+                    continue
+                has_runnable = True
+                tg_ref["tg"].create_task(run_wrapper(task_name))
+            if not has_runnable:
+                # Wave contributes to dependents even if no runnable tasks
+                return
+
+        async def on_task_complete(task_name: str):
+            for consumer_idx in task_to_consumer_waves.get(task_name, ()):
+                if consumer_idx >= len(completed):
+                    continue
+                completed[consumer_idx] += 1
+                if completed[consumer_idx] >= targets[consumer_idx]:
+                    await schedule_wave(consumer_idx)
+
+        async def run_wrapper(task_name: str):
+            try:
+                await run_task(task_name, tg_ref["tg"])
+            except BaseException as exc:
+                if not propagate_exceptions:
+                    exceptions.append(exc)
+                    if complete_on_error:
+                        await on_task_complete(task_name)
+                    return
+                if complete_on_error:
+                    await on_task_complete(task_name)
+                raise
+            else:
+                await on_task_complete(task_name)
+
+        async with asyncio.TaskGroup() as tg:
+            tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
+            for idx in sorted(wave_lookup):
+                if targets[idx] == 0:
+                    await schedule_wave(idx)
+
+        return exceptions
 
 
 @dataclass

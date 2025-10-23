@@ -1,16 +1,13 @@
 """
 Task group classes.
 """
-import inspect
+
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from datatrees import datatree, dtfield
 from typing import Any, Callable, Generic, TypeVar
 
-
 T = TypeVar("T")
-
 
 class RetryableException(BaseException):
     """An exception that can be retried."""
@@ -28,7 +25,7 @@ class SdaxTaskGroup(ABC):
         pass
 
 
-@datatree(frozen=True)
+@dataclass(frozen=True)
 class TaskFunction(Generic[T]):
     """Encapsulates a callable with its own execution parameters.
 

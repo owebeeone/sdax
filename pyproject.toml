@@ -17,8 +17,6 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "datatrees>=0.3.7",
-    "frozendict>=2.4.6",
 ]
 
 [project.license]
@@ -32,6 +30,7 @@ Issues = "https://github.com/owebeeone/sdax/issues"
 dev = [
     "ruff",
     "mypy",
+    "pytest-asyncio",
 ]
 
 [build-system]
@@ -56,3 +55,9 @@ select = [
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
+
+[tool.hatch.envs.test]
+dependencies = [
+  "pytest",
+  "pytest-asyncio"  # <-- Add this
+]
