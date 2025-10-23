@@ -9,6 +9,7 @@ from typing import Any, Callable, Generic, TypeVar
 
 T = TypeVar("T")
 
+
 class RetryableException(BaseException):
     """An exception that can be retried."""
 
@@ -25,7 +26,7 @@ class SdaxTaskGroup(ABC):
         pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TaskFunction(Generic[T]):
     """Encapsulates a callable with its own execution parameters.
 
@@ -50,7 +51,7 @@ class TaskFunction(Generic[T]):
         return self.function(arg)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False, order=False, slots=True)
 class AsyncTask(Generic[T]):
     """A declarative definition of a task with optional pre-execute, execute,
     and post-execute phases, each with its own configuration."""

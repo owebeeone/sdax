@@ -45,7 +45,7 @@ class AsyncTaskProcessor(Generic[T], ABC):
         pass
 
     @staticmethod
-    def builder(use_dag: bool = True) -> AsyncTaskProcessorBuilder[T]:
+    def builder() -> AsyncTaskProcessorBuilder[T]:
         return AsyncDagLevelAdapterBuilder[T]()
 
 
@@ -158,7 +158,8 @@ class AsyncDagTaskProcessor(Generic[T]):
             try:
                 async with asyncio.TaskGroup() as tg:
                     tg_wrapper = _TaskGroupWrapper(task_group=tg)
-                    tg.create_task(self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
+                    tg.create_task(
+                        self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
             except ExceptionGroup as eg:
                 return eg
             return None
@@ -213,7 +214,16 @@ class AsyncDagTaskProcessor(Generic[T]):
         timeout = task_func_obj.timeout
         initial_delay = task_func_obj.initial_delay
         backoff_factor = task_func_obj.backoff_factor
+        retryable_exceptions = task_func_obj.retryable_exceptions
         ctx = exec_ctx.user_context
+
+        # If retryable_exceptions is empty, no retries should occur
+        if not retryable_exceptions:
+            if timeout is None:
+                await task_func_obj.call(ctx, tg_wrapper)
+            else:
+                await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
+            return
         for attempt in range(retries + 1):
             try:
                 if timeout is None:
@@ -221,7 +231,7 @@ class AsyncDagTaskProcessor(Generic[T]):
                 else:
                     await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
                 return
-            except (asyncio.TimeoutError, ConnectionError) as _:
+            except retryable_exceptions as _:
                 if attempt >= retries:
                     raise
                 delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
@@ -309,7 +319,8 @@ class AsyncDagTaskProcessor(Generic[T]):
 class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T]):
     """Level-compatible builder that adapts to DAG by inserting level nodes.
 
-    API matches AsyncTaskProcessorBuilder: add_task(task, level) -> self; build() -> AsyncDagTaskProcessor.
+    API matches AsyncTaskProcessorBuilder: add_task(task, level) -> self;
+    build() -> AsyncDagTaskProcessor.
     """
 
     _levels: Dict[int, List[AsyncTask[T]]] = field(default_factory=lambda: defaultdict(list))

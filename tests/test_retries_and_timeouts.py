@@ -134,6 +134,123 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
         await processor.process_tasks(ctx)
         self.assertTrue(ctx.data.get("completed"))
 
+    async def test_empty_retryable_exceptions_no_retry(self):
+        """Verify that empty retryable_exceptions prevents retries."""
+        ctx = TaskContext()
+
+        async def always_fails(context: TaskContext):
+            global ATTEMPTS
+            ATTEMPTS["always_fails"] += 1
+            raise ValueError("This always fails")
+
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="NoRetryTask",
+                    execute=TaskFunction(
+                        function=always_fails,
+                        retries=3,  # Would normally retry 3 times
+                        retryable_exceptions=(),  # Empty tuple = no retries
+                    ),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        # Should fail immediately without retries
+        try:
+            await processor.process_tasks(ctx)
+            self.fail("Expected an exception to be raised")
+        except ExceptionGroup as eg:
+            # Check that the underlying exception is ValueError
+            self.assertEqual(len(eg.exceptions), 1)
+            self.assertIsInstance(eg.exceptions[0], ValueError)
+            self.assertEqual(str(eg.exceptions[0]), "This always fails")
+
+        # Should only have been called once (no retries)
+        self.assertEqual(ATTEMPTS["always_fails"], 1)
+
+    async def test_custom_retryable_exceptions_success(self):
+        """Verify that custom retryable_exceptions work correctly for retryable errors."""
+        ctx = TaskContext()
+
+        class CustomRetryableError(Exception):
+            pass
+
+        async def fails_with_retryable(context: TaskContext):
+            global ATTEMPTS
+            ATTEMPTS["fails_with_retryable"] += 1
+            if ATTEMPTS["fails_with_retryable"] < 3:
+                raise CustomRetryableError("Retryable error")
+            context.data["succeeded"] = True
+
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="RetryableTask",
+                    execute=TaskFunction(
+                        function=fails_with_retryable,
+                        retries=3,
+                        retryable_exceptions=(CustomRetryableError,),
+                    ),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        # Should succeed after retries
+        await processor.process_tasks(ctx)
+        self.assertTrue(ctx.data.get("succeeded"))
+        self.assertEqual(ATTEMPTS["fails_with_retryable"], 3)
+
+    async def test_custom_retryable_exceptions_failure(self):
+        """Verify that custom retryable_exceptions work correctly for non-retryable errors."""
+        ctx = TaskContext()
+
+        class CustomRetryableError(Exception):
+            pass
+
+        class CustomNonRetryableError(Exception):
+            pass
+
+        async def fails_with_non_retryable(context: TaskContext):
+            global ATTEMPTS
+            ATTEMPTS["fails_with_non_retryable"] += 1
+            raise CustomNonRetryableError("Non-retryable error")
+
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="NonRetryableTask",
+                    execute=TaskFunction(
+                        function=fails_with_non_retryable,
+                        retries=3,
+                        retryable_exceptions=(CustomRetryableError,),  # Different exception type
+                    ),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        # Should fail immediately without retries
+        try:
+            await processor.process_tasks(ctx)
+            self.fail("Expected an exception to be raised")
+        except ExceptionGroup as eg:
+            # Check that the underlying exception is CustomNonRetryableError
+            self.assertEqual(len(eg.exceptions), 1)
+            self.assertIsInstance(eg.exceptions[0], CustomNonRetryableError)
+            self.assertEqual(str(eg.exceptions[0]), "Non-retryable error")
+
+        # Should only have been called once (no retries)
+        self.assertEqual(ATTEMPTS["fails_with_non_retryable"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,18 +6,22 @@ declarative, and parallel asynchronous tasks in Python.
 """
 
 from .sdax_core import (
-    AsyncTaskProcessor,
+    AsyncDagLevelAdapterBuilder,
     AsyncDagTaskProcessor,
     AsyncDagTaskProcessorBuilder,
+    AsyncTaskProcessor,
 )
-from .tasks import AsyncTask, TaskFunction
+from .tasks import AsyncTask, RetryableException, SdaxTaskGroup, TaskFunction
 
 __version__ = "0.1.0"
 
 __all__ = [
     "AsyncTask",
+    "RetryableException",
+    "SdaxTaskGroup",
     "TaskFunction",
     "AsyncTaskProcessor",
     "AsyncDagTaskProcessor",
     "AsyncDagTaskProcessorBuilder",
+    "AsyncDagLevelAdapterBuilder",
 ]
