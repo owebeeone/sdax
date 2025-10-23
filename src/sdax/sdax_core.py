@@ -144,7 +144,7 @@ class AsyncDagTaskProcessor(Generic[T]):
 
         # -------- Execute (single TaskGroup across eligible tasks) --------
         exec_exception: BaseException | None = None
-        exec_names = getattr(analysis, "execute_task_names", ())
+        exec_names = analysis.execute_task_names
         exec_to_run: list[str] = []
         for name in exec_names:
             t = tasks_by_name[name]

@@ -1,4 +1,7 @@
 import asyncio
+import inspect
+import sys
+import time
 import unittest
 from dataclasses import dataclass, field
 from typing import Dict, List
@@ -44,11 +47,28 @@ async def fail_exec(name: str, ctx: TaskContext):
     raise ValueError(f"{name} failed execute")
 
 
+def bind_async(func, *args):
+    async def _bound(ctx: TaskContext):
+        result = func(*args, ctx)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    return _bound
+
+
 class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         """Clear the call log before each test."""
         global CALL_LOG
         CALL_LOG = []
+
+    async def _build_processor_from_levels(self, levels: Dict[int, List[AsyncTask]]) -> AsyncTaskProcessor:
+        builder = AsyncTaskProcessor.builder()
+        for level in sorted(levels.keys()):
+            for task in levels[level]:
+                builder = builder.add_task(task, level)
+        return builder.build()
 
     async def test_successful_multi_level_execution_order(self):
         """Verify the correct execution order for a successful run."""
@@ -61,16 +81,16 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L1A",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1A")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1A")),
                 ),
                 1,
             )
             .add_task(
                 AsyncTask(
                     "L1B",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1B")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1B")),
                 ),
                 1,
             )
@@ -78,9 +98,9 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L2A",
-                    pre_execute=TaskFunction(lambda c: log_pre("L2A", c)),
-                    execute=TaskFunction(lambda c: log_exec("L2A", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L2A")),
+                    execute=TaskFunction(bind_async(log_exec, "L2A")),
+                    post_execute=TaskFunction(bind_async(log_post, "L2A")),
                 ),
                 2,
             )
@@ -110,8 +130,8 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L1A",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1A")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1A")),
                 ),
                 1,
             )
@@ -119,16 +139,16 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L2A",
-                    pre_execute=TaskFunction(lambda c: fail_pre("L2A", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L2A", c)),
+                    pre_execute=TaskFunction(bind_async(fail_pre, "L2A")),
+                    post_execute=TaskFunction(bind_async(log_post, "L2A")),
                 ),
                 2,
             )
             .add_task(
                 AsyncTask(
                     "L2B",
-                    pre_execute=TaskFunction(lambda c: log_pre("L2B", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L2B", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L2B")),
+                    post_execute=TaskFunction(bind_async(log_post, "L2B")),
                 ),
                 2,
             )
@@ -164,17 +184,17 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L1A",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1A", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1A", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1A")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1A")),
                 ),
                 1,
             )
             .add_task(
                 AsyncTask(
                     "L1B",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1B", c)),
-                    execute=TaskFunction(lambda c: fail_exec("L1B", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1B", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1B")),
+                    execute=TaskFunction(bind_async(fail_exec, "L1B")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1B")),
                 ),
                 1,
             )
@@ -204,8 +224,8 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L1-NoPre",
-                    execute=TaskFunction(lambda c: log_exec("L1-NoPre", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1-NoPre", c)),
+                    execute=TaskFunction(bind_async(log_exec, "L1-NoPre")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1-NoPre")),
                 ),
                 1,
             )
@@ -213,15 +233,15 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             .add_task(
                 AsyncTask(
                     "L1-NoExec",
-                    pre_execute=TaskFunction(lambda c: log_pre("L1-NoExec", c)),
-                    post_execute=TaskFunction(lambda c: log_post("L1-NoExec", c)),
+                    pre_execute=TaskFunction(bind_async(log_pre, "L1-NoExec")),
+                    post_execute=TaskFunction(bind_async(log_post, "L1-NoExec")),
                 ),
                 1,
             )
             # Only post_execute, should not run pre or exec
             .add_task(
                 AsyncTask(
-                    "L2-PostOnly", post_execute=TaskFunction(lambda c: log_post("L2-PostOnly", c))
+                    "L2-PostOnly", post_execute=TaskFunction(bind_async(log_post, "L2-PostOnly"))
                 ),
                 2,
             )
@@ -244,6 +264,99 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("L1-NoPre-pre", CALL_LOG)
         # Verify L1-NoExec did not run execute
         self.assertNotIn("L1-NoExec-exec", CALL_LOG)
+
+    async def test_post_execute_respects_dependency_order(self):
+        """Child cleanup must finish before parent cleanup begins."""
+        ctx = TaskContext(data={"child_done": False, "order": []})
+
+        async def pre(name: str, ctx: TaskContext):
+            CALL_LOG.append(f"{name}-pre")
+
+        async def post_child(ctx: TaskContext):
+            ctx.data["order"].append("child:start")
+            await asyncio.sleep(0.1)
+
+            ctx.data["child_done"] = True
+            ctx.data["order"].append("child:end")
+
+
+        async def post_parent(ctx: TaskContext):
+            ctx.data["order"].append("parent:start")
+            self.assertTrue(
+                ctx.data.get("child_done"),
+                "Child post_execute must complete before parent starts",
+            )
+            ctx.data["order"].append("parent:end")
+
+        processor = await self._build_processor_from_levels(
+            {
+                1: [
+                    AsyncTask(
+                        "Parent",
+                        pre_execute=TaskFunction(bind_async(pre, "Parent")),
+                        post_execute=TaskFunction(post_parent),
+                    )
+                ],
+                2: [
+                    AsyncTask(
+                        "Child",
+                        pre_execute=TaskFunction(bind_async(pre, "Child")),
+                        post_execute=TaskFunction(post_child),
+                    )
+                ],
+            }
+        )
+
+        await processor.process_tasks(ctx)
+        self.assertEqual(
+            ctx.data["order"],
+            ["child:start", "child:end", "parent:start", "parent:end"],
+        )
+
+    async def test_post_execute_waits_for_all_dependents(self):
+        """Root cleanup must wait for every dependent cleanup to finish."""
+        ctx = TaskContext(data={"completed": set()})
+
+        async def pre(name: str, ctx: TaskContext):
+            CALL_LOG.append(f"{name}-pre")
+
+        async def post_mid(name: str, ctx: TaskContext):
+            await asyncio.sleep(0.05)
+            ctx.data["completed"].add(name)
+
+        async def post_root(ctx: TaskContext):
+            self.assertSetEqual(
+                ctx.data.get("completed"),
+                {"MidA", "MidB"},
+                "Root post_execute must wait for all dependents to complete",
+            )
+
+        processor = await self._build_processor_from_levels(
+            {
+                1: [
+                    AsyncTask(
+                        "Root",
+                        pre_execute=TaskFunction(bind_async(pre, "Root")),
+                        post_execute=TaskFunction(post_root),
+                    )
+                ],
+                2: [
+                    AsyncTask(
+                        "MidA",
+                        pre_execute=TaskFunction(bind_async(pre, "MidA")),
+                        post_execute=TaskFunction(bind_async(post_mid, "MidA")),
+                    ),
+                    AsyncTask(
+                        "MidB",
+                        pre_execute=TaskFunction(bind_async(pre, "MidB")),
+                        post_execute=TaskFunction(bind_async(post_mid, "MidB")),
+                    ),
+                ],
+            }
+        )
+
+        await processor.process_tasks(ctx)
+        self.assertSetEqual(ctx.data["completed"], {"MidA", "MidB"})
 
 
 if __name__ == "__main__":
