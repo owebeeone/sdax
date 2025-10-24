@@ -1,6 +1,6 @@
 [project]
 name = "sdax"
-version = "0.4.0"
+version = "0.5.0"
 description = "A lightweight, high-performance, in-process micro-orchestrator for structured, declarative, and parallel asynchronous tasks in Python."
 authors = [
     { name = "Gianni Mariani", email = "gianni@mariani.ws" },
@@ -16,8 +16,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.11"
-dependencies = [
-]
+dependencies = []
 
 [project.license]
 text = "MIT"
@@ -58,6 +57,6 @@ warn_unused_configs = true
 
 [tool.hatch.envs.test]
 dependencies = [
-  "pytest",
-  "pytest-asyncio"  # <-- Add this
+    "pytest",
+    "pytest-asyncio",
 ]
