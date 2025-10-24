@@ -253,7 +253,7 @@ Key properties:
 - `post_execute` uses the reverse dependency graph to order cleanup, running each task's cleanup in isolation and aggregating exceptions.
 
 Failure semantics:
-- **If any `pre_execute` fails**: all remaining scheduled `pre_execute` tasks are cancelled; no further pre waves are started; the `execute` phase is skipped; `post_execute` still runs for tasks whose pre was started (and for tasks with no pre) in reverse dependency order; exceptions are aggregated.
+- **If any `pre_execute` fails**: all remaining scheduled `pre_execute` tasks are cancelled; no further pre waves are started; the `execute` phase is skipped; `post_execute` still runs for tasks whose pre was started (plus post-only tasks whose dependency chain completed successfully) in reverse dependency order; exceptions are aggregated.
 - **If any `execute` fails**: other execute tasks continue; `post_execute` runs; exceptions are aggregated.
 - **If any `post_execute` fails**: siblings are not cancelled; all eligible cleanup still runs; exceptions are aggregated.
 - The final error is an `ExceptionGroup` that may include failures from pre, execute, and post.
