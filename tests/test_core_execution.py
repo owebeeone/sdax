@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from sdax import AsyncTask, AsyncTaskProcessor, TaskFunction
+from sdax.sdax_core import AsyncDagTaskProcessor
 
 
 @dataclass
@@ -357,6 +358,97 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
 
         await processor.process_tasks(ctx)
         self.assertSetEqual(ctx.data["completed"], {"MidA", "MidB"})
+
+    async def test_post_only_tasks_skipped_when_dependency_fails(self):
+        """Post-only cleanup tasks should not run when dependencies never complete."""
+        ctx = TaskContext()
+
+        processor = (
+            AsyncDagTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="A",
+                    pre_execute=TaskFunction(bind_async(log_pre, "A")),
+                    post_execute=TaskFunction(bind_async(log_post, "A")),
+                ),
+                depends_on=(),
+            )
+            .add_task(
+                AsyncTask(
+                    name="B",
+                    pre_execute=TaskFunction(bind_async(fail_pre, "B")),
+                ),
+                depends_on=("A",),
+            )
+            .add_task(
+                AsyncTask(
+                    name="C",
+                    post_execute=TaskFunction(bind_async(log_post, "C")),
+                ),
+                depends_on=("B",),
+            )
+            .add_task(
+                AsyncTask(
+                    name="D",
+                    post_execute=TaskFunction(bind_async(log_post, "D")),
+                ),
+                depends_on=("C", "A"),
+            )
+            .build()
+        )
+
+        with self.assertRaises(ExceptionGroup):
+            await processor.process_tasks(ctx)
+
+        self.assertIn("B-pre-fail", CALL_LOG, "Expected upstream failure to occur")
+        self.assertIn(
+            "A-post", CALL_LOG, "Upstream task with started pre_execute should clean up"
+        )
+        self.assertNotIn("C-post", CALL_LOG, "Dependent post-only task must not run")
+        self.assertNotIn("D-post", CALL_LOG, "Downstream post-only task must not run")
+
+    async def test_post_only_tasks_run_when_dependencies_succeed(self):
+        """Post-only cleanup tasks should run when dependencies complete successfully."""
+        ctx = TaskContext()
+
+        processor = (
+            AsyncDagTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="A",
+                    pre_execute=TaskFunction(bind_async(log_pre, "A")),
+                    post_execute=TaskFunction(bind_async(log_post, "A")),
+                ),
+                depends_on=(),
+            )
+            .add_task(
+                AsyncTask(
+                    name="B",
+                    post_execute=TaskFunction(bind_async(log_post, "B")),
+                ),
+                depends_on=("A",),
+            )
+            .add_task(
+                AsyncTask(
+                    name="C",
+                    post_execute=TaskFunction(bind_async(log_post, "C")),
+                ),
+                depends_on=("B",),
+            )
+            .build()
+        )
+
+        await processor.process_tasks(ctx)
+
+        self.assertIn("A-pre", CALL_LOG, "Upstream task should run pre")
+        self.assertIn("A-post", CALL_LOG, "Upstream task should run post cleanup")
+        self.assertIn("B-post", CALL_LOG, "Post-only dependent task should run cleanup")
+        self.assertIn("C-post", CALL_LOG, "Post-only downstream task should run cleanup")
+        self.assertLess(
+            CALL_LOG.index("C-post"),
+            CALL_LOG.index("B-post"),
+            "Downstream post-only cleanup must occur before its dependency",
+        )
 
 
 if __name__ == "__main__":

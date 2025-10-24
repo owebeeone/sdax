@@ -93,6 +93,9 @@ class TaskAnalysis(Generic[T]):
     pre_task_names: Tuple[str, ...]
     execute_task_names: Tuple[str, ...]
     post_task_names: Tuple[str, ...]
+    # Additional metadata for runtime scheduling
+    post_only_task_names: Tuple[str, ...]
+    topological_order: Tuple[str, ...]
 
     # Statistics
     total_tasks: int
@@ -199,6 +202,9 @@ class TaskAnalyzer(Generic[T]):
         self._validate_dependencies()
         self._detect_cycles()
 
+        # Pre-compute topological order for reuse across build steps
+        self._topological_order = self._topological_sort()
+
         # Build execution graphs and derived metadata
         pre_exec_graph = self._build_pre_execute_graph()
         post_exec_graph = self._build_post_execute_graph()
@@ -210,6 +216,13 @@ class TaskAnalyzer(Generic[T]):
         pre_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.pre_execute is not None))
         execute_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.execute is not None))
         post_task_names = tuple(sorted(n for n, t in self.tasks.items() if t.post_execute is not None))
+        post_only_task_names = tuple(
+            sorted(
+                n
+                for n, t in self.tasks.items()
+                if t.post_execute is not None and t.pre_execute is None
+            )
+        )
 
         return TaskAnalysis(
             tasks=dict(self.tasks),
@@ -225,6 +238,8 @@ class TaskAnalyzer(Generic[T]):
             pre_task_names=pre_task_names,
             execute_task_names=execute_task_names,
             post_task_names=post_task_names,
+            post_only_task_names=post_only_task_names,
+            topological_order=tuple(self._topological_order),
             **stats,
             max_pre_wave_num=len(pre_exec_graph.waves),
             max_post_wave_num=len(post_exec_graph.waves),
@@ -348,7 +363,10 @@ class TaskAnalyzer(Generic[T]):
         eff_cache: Dict[str, Set[str]] = {}
 
         # Use topological sort to process in order
-        topo_order = self._topological_sort()
+        topo_order = getattr(self, "_topological_order", None)
+        if topo_order is None:
+            topo_order = self._topological_sort()
+            self._topological_order = topo_order
 
         for task_name in topo_order:
             if task_name not in pre_exec_tasks:
@@ -485,7 +503,11 @@ class TaskAnalyzer(Generic[T]):
         wave_depends_on_tasks: Dict[int, Tuple[str, ...]] = {}
 
         # Reverse topo ensures we place dependents first
-        reverse_topo = self._topological_sort()[::-1]
+        topo_order = getattr(self, "_topological_order", None)
+        if topo_order is None:
+            topo_order = self._topological_sort()
+            self._topological_order = topo_order
+        reverse_topo = topo_order[::-1]
 
         for task_name in reverse_topo:
             if task_name not in post_exec_tasks:

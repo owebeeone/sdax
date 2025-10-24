@@ -8,7 +8,7 @@ This module contains the core engine classes for the SDAX framework.
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, Tuple, TypeVar
 
@@ -169,6 +169,8 @@ class AsyncDagTaskProcessor(Generic[T]):
         post_exceptions: list[BaseException] = []
         post_waves = analysis.post_execute_graph.waves
 
+        synthetic_pre_started = self._compute_synthetic_pre_started(pre_succeeded)
+
         async def run_post_isolated(task: AsyncTask[T]):
             if not task.post_execute:
                 return None
@@ -186,7 +188,7 @@ class AsyncDagTaskProcessor(Generic[T]):
             if task.post_execute is None:
                 return False
             if task.pre_execute is None:
-                return True
+                return name in synthetic_pre_started
             return name in pre_started
 
         async def run_post(name: str, tg_wrapper: _TaskGroupWrapper):
@@ -253,6 +255,53 @@ class AsyncDagTaskProcessor(Generic[T]):
                     raise
                 delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
                 await asyncio.sleep(delay)
+
+    def _compute_synthetic_pre_started(self, pre_succeeded: set[str]) -> set[str]:
+        """Compute tasks that can be treated as having completed pre-execute.
+
+        Tasks with real pre-execute must have succeeded. Tasks without pre-execute
+        are considered started only if all their dependencies have already been
+        deemed started (recursively).
+        """
+        analysis = self.analysis
+        tasks = analysis.tasks
+        dependencies = analysis.dependencies
+
+        ready: set[str] = set(pre_succeeded)
+        topo_order = analysis.topological_order or tuple(self._topological_order())
+
+        for name in topo_order:
+            task = tasks[name]
+            deps = dependencies.get(name, ())
+            if task.pre_execute is not None:
+                if name in pre_succeeded:
+                    ready.add(name)
+                continue
+            if all(dep in ready for dep in deps):
+                ready.add(name)
+        return ready
+
+    def _topological_order(self) -> List[str]:
+        dependencies = self.analysis.dependencies
+        tasks = self.analysis.tasks
+
+        in_degree = {name: len(dependencies.get(name, ())) for name in tasks}
+        dependents: Dict[str, List[str]] = defaultdict(list)
+        for task_name, deps in dependencies.items():
+            for dep in deps:
+                dependents[dep].append(task_name)
+
+        queue: deque[str] = deque(sorted(name for name, deg in in_degree.items() if deg == 0))
+        order: List[str] = []
+
+        while queue:
+            current = queue.popleft()
+            order.append(current)
+            for dependent in dependents.get(current, ()):
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+        return order
 
     async def _run_wave_phase(
         self,
