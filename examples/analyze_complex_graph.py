@@ -1,11 +1,10 @@
 """Example: Analyzing a complex task dependency graph.
 
 This demonstrates how the task analyzer builds execution waves
-for optimal parallel execution.
+for optimal parallel execution using the fluent builder API.
 """
 
-from sdax.sdax_core import AsyncTask, TaskFunction
-from sdax.sdax_task_analyser import TaskAnalyzer
+from sdax.sdax_core import AsyncTask, TaskFunction, AsyncDagTaskProcessor
 
 
 # Helper for creating test tasks
@@ -50,29 +49,33 @@ def example_e_commerce_workflow():
     print("=" * 70)
     print()
     
-    analyzer = TaskAnalyzer()
+    # Build processor using fluent builder pattern
+    processor = (
+        AsyncDagTaskProcessor.builder()
+        # Phase 1: Validation (independent)
+        .add_task(make_task('check_inventory', has_pre=True, has_post=True), depends_on=())
+        .add_task(make_task('validate_payment', has_pre=True, has_post=True), depends_on=())
+        .add_task(make_task('verify_address', has_pre=True), depends_on=())
+        
+        # Milestone node: all validations complete
+        .add_task(make_task('order_validated', is_node=True), depends_on=('check_inventory', 'validate_payment', 'verify_address'))
+        
+        # Phase 2: Commitment (after validation)
+        .add_task(make_task('reserve_inventory', has_pre=True, has_post=True), depends_on=('order_validated',))
+        .add_task(make_task('charge_payment', has_pre=True, has_post=True), depends_on=('order_validated',))
+        
+        # Milestone node: order committed
+        .add_task(make_task('order_committed', is_node=True), depends_on=('reserve_inventory', 'charge_payment'))
+        
+        # Phase 3: Fulfillment (after commitment)
+        .add_task(make_task('create_shipment', has_pre=True), depends_on=('order_committed',))
+        .add_task(make_task('send_confirmation', has_pre=True), depends_on=('order_committed',))
+        .add_task(make_task('update_analytics', has_pre=True), depends_on=('order_committed',))
+        .build()
+    )
     
-    # Phase 1: Validation (independent)
-    analyzer.add_task(make_task('check_inventory', has_pre=True, has_post=True), depends_on=())
-    analyzer.add_task(make_task('validate_payment', has_pre=True, has_post=True), depends_on=())
-    analyzer.add_task(make_task('verify_address', has_pre=True), depends_on=())
-    
-    # Milestone node: all validations complete
-    analyzer.add_task(make_task('order_validated', is_node=True), depends_on=('check_inventory', 'validate_payment', 'verify_address'))
-    
-    # Phase 2: Commitment (after validation)
-    analyzer.add_task(make_task('reserve_inventory', has_pre=True, has_post=True), depends_on=('order_validated',))
-    analyzer.add_task(make_task('charge_payment', has_pre=True, has_post=True), depends_on=('order_validated',))
-    
-    # Milestone node: order committed
-    analyzer.add_task(make_task('order_committed', is_node=True), depends_on=('reserve_inventory', 'charge_payment'))
-    
-    # Phase 3: Fulfillment (after commitment)
-    analyzer.add_task(make_task('create_shipment', has_pre=True), depends_on=('order_committed',))
-    analyzer.add_task(make_task('send_confirmation', has_pre=True), depends_on=('order_committed',))
-    analyzer.add_task(make_task('update_analytics', has_pre=True), depends_on=('order_committed',))
-    
-    analysis = analyzer.analyze()
+    # Access the analysis from the processor
+    analysis = processor.analysis
     
     print(analysis)
     print()
@@ -94,22 +97,26 @@ def example_with_independent_chains():
     print("=" * 70)
     print()
     
-    analyzer = TaskAnalyzer()
+    # Build processor using fluent builder pattern
+    processor = (
+        AsyncDagTaskProcessor.builder()
+        # Chain 1: User processing
+        .add_task(make_task('fetch_user', has_pre=True), depends_on=())
+        .add_task(make_task('enrich_user', has_pre=True), depends_on=('fetch_user',))
+        .add_task(make_task('cache_user', has_pre=True), depends_on=('enrich_user',))
+        
+        # Chain 2: Order processing (completely independent)
+        .add_task(make_task('fetch_orders', has_pre=True), depends_on=())
+        .add_task(make_task('aggregate_orders', has_pre=True), depends_on=('fetch_orders',))
+        .add_task(make_task('cache_orders', has_pre=True), depends_on=('aggregate_orders',))
+        
+        # Final merge
+        .add_task(make_task('generate_report', has_pre=True), depends_on=('cache_user', 'cache_orders'))
+        .build()
+    )
     
-    # Chain 1: User processing
-    analyzer.add_task(make_task('fetch_user', has_pre=True), depends_on=())
-    analyzer.add_task(make_task('enrich_user', has_pre=True), depends_on=('fetch_user',))
-    analyzer.add_task(make_task('cache_user', has_pre=True), depends_on=('enrich_user',))
-    
-    # Chain 2: Order processing (completely independent)
-    analyzer.add_task(make_task('fetch_orders', has_pre=True), depends_on=())
-    analyzer.add_task(make_task('aggregate_orders', has_pre=True), depends_on=('fetch_orders',))
-    analyzer.add_task(make_task('cache_orders', has_pre=True), depends_on=('aggregate_orders',))
-    
-    # Final merge
-    analyzer.add_task(make_task('generate_report', has_pre=True), depends_on=('cache_user', 'cache_orders'))
-    
-    analysis = analyzer.analyze()
+    # Access the analysis from the processor
+    analysis = processor.analysis
     
     print(analysis)
     print()
