@@ -4,12 +4,13 @@ SDAX core engine classes.
 This module contains the core engine classes for the SDAX framework.
 """
 
+
 import asyncio
 import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, Tuple, TypeVar
 
 from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
 from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
@@ -53,20 +54,36 @@ class AsyncTaskProcessor(Generic[T], ABC):
 class AsyncDagTaskProcessorBuilder(Generic[T]):
     """Builder for DAG-based task processor using precomputed TaskAnalysis."""
 
-    analysis: TaskAnalysis[T] | None = None
+    taskAnalyzer: TaskAnalyzer[T] = field(default_factory=TaskAnalyzer)
 
-    def from_analysis(self, analysis: TaskAnalysis[T]) -> "AsyncDagTaskProcessorBuilder[T]":
-        self.analysis = analysis
+    def add_task(
+        self,
+        task: AsyncTask[T],
+        depends_on: Tuple[str, ...] = (),
+    ) -> "AsyncDagTaskProcessorBuilder[T]":
+        """Add a task to the analyzer.
+
+        Args:
+            task: The AsyncTask to add
+            depends_on: Tuple of task names this task depends on
+
+        Returns:
+            Self for fluent chaining
+
+        Raises:
+            ValueError: If task name already exists
+        """
+        self.taskAnalyzer.add_task(task, depends_on=depends_on)
         return self
 
     def build(self) -> "AsyncDagTaskProcessor[T]":
-        if self.analysis is None:
-            raise ValueError("TaskAnalysis must be provided via from_analysis()")
-        return AsyncDagTaskProcessor(analysis=self.analysis)
+        analysis = self.taskAnalyzer.analyze()
+        return AsyncDagTaskProcessor(analysis=analysis)
 
 
 @dataclass(frozen=True)
 class _TaskGroupWrapper(SdaxTaskGroup):
+    """Wrapper for asyncio.TaskGroup to provide a SdaxTaskGroup interface."""
     task_group: asyncio.TaskGroup
 
     def create_task(
@@ -330,10 +347,9 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T]):
         return self
 
     def build(self) -> AsyncDagTaskProcessor:
-        analyzer = TaskAnalyzer()
+        builder = AsyncDagTaskProcessor[T].builder()
         if not self._levels:
-            analysis = analyzer.analyze()
-            return AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+            return builder.build()
 
         sorted_levels = sorted(self._levels.keys())
 
@@ -348,23 +364,22 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T]):
         for lvl in sorted_levels:
             # Ensure below node for this level; link to previous level's above node if exists
             deps_for_below = () if prev_level is None else (above_name(prev_level),)
-            analyzer.add_task(AsyncTask(name=below_name(lvl)), depends_on=deps_for_below)
+            builder.add_task(AsyncTask(name=below_name(lvl)), depends_on=deps_for_below)
 
             # Add real tasks at this level depending on below node
             for task in self._levels[lvl]:
-                analyzer.add_task(task, depends_on=(below_name(lvl),))
+                builder.add_task(task, depends_on=(below_name(lvl),))
 
             # Add an above node that depends on all tasks at this level (if none, depends on below)
             level_tasks = self._levels[lvl]
             if level_tasks:
-                analyzer.add_task(
+                builder.add_task(
                     AsyncTask(name=above_name(lvl)),
                     depends_on=tuple(t.name for t in level_tasks),
                 )
             else:
-                analyzer.add_task(AsyncTask(name=above_name(lvl)), depends_on=(below_name(lvl),))
+                builder.add_task(AsyncTask(name=above_name(lvl)), depends_on=(below_name(lvl),))
 
             prev_level = lvl
 
-        analysis = analyzer.analyze()
-        return AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+        return builder.build()

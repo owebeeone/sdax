@@ -46,13 +46,22 @@ Graph-based (task dependency graph):
 import asyncio
 from dataclasses import dataclass
 from sdax import AsyncTask, TaskFunction
-from sdax.sdax_task_analyser import TaskAnalyzer
 from sdax.sdax_core import AsyncDagTaskProcessor
 
 @dataclass
 class TaskContext:
+    db_connection: Any = None
     user_id: int | None = None
     feature_flags: dict | None = None
+
+async def open_db(ctx: TaskContext):
+    ctx.db_connection = await create_database_connection()
+    print("Database opened")
+
+async def close_db(ctx: TaskContext):
+    if ctx.db_connection:
+        await ctx.db_connection.close()
+        print("Database closed")
 
 async def check_auth(ctx: TaskContext):
     await asyncio.sleep(0.1)
@@ -67,13 +76,32 @@ async def fetch_user_data(ctx: TaskContext):
         raise ValueError("Auth failed")
     await asyncio.sleep(0.1)
 
-analyzer = TaskAnalyzer()
-analyzer.add_task(AsyncTask(name="Auth", pre_execute=TaskFunction(check_auth)), depends_on=())
-analyzer.add_task(AsyncTask(name="Flags", pre_execute=TaskFunction(load_feature_flags)), depends_on=())
-analyzer.add_task(AsyncTask(name="Fetch", execute=TaskFunction(fetch_user_data)), depends_on=("Auth",))
-
-analysis = analyzer.analyze()
-processor = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+# Fluent builder pattern with generic type parameter
+processor = (
+    AsyncDagTaskProcessor[TaskContext]
+    .builder()
+    .add_task(
+        AsyncTask(
+            name="Database", 
+            pre_execute=TaskFunction(open_db), 
+            post_execute=TaskFunction(close_db)
+        ), 
+        depends_on=()
+    )
+    .add_task(
+        AsyncTask(name="Auth", pre_execute=TaskFunction(check_auth)), 
+        depends_on=("Database",)
+    )
+    .add_task(
+        AsyncTask(name="Flags", pre_execute=TaskFunction(load_feature_flags)), 
+        depends_on=("Database",)
+    )
+    .add_task(
+        AsyncTask(name="Fetch", execute=TaskFunction(fetch_user_data)), 
+        depends_on=("Auth",)
+    )
+    .build()
+)
 
 # await processor.process_tasks(TaskContext())
 ```
@@ -85,6 +113,7 @@ from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction
 
 processor = (
     AsyncTaskProcessor.builder()
+    .add_task(AsyncTask("Database", pre_execute=TaskFunction(open_db), post_execute=TaskFunction(close_db)), level=0)
     .add_task(AsyncTask("Auth", pre_execute=TaskFunction(check_auth)), level=1)
     .add_task(AsyncTask("Flags", pre_execute=TaskFunction(load_feature_flags)), level=1)
     .add_task(AsyncTask("Fetch", execute=TaskFunction(fetch_user_data)), level=2)
@@ -143,26 +172,79 @@ In addition to level-based execution, sdax supports execution driven by a task d
 - **Validation**: The `TaskAnalyzer` validates the graph (cycles, missing deps) at build time.
 - **Immutability**: The analyzer output and processors are immutable and safe to reuse across concurrent executions.
 
-Minimal example:
+Advanced example with complex dependencies:
 
 ```python
-from sdax import AsyncTask, TaskFunction
-from sdax.sdax_task_analyser import TaskAnalyzer
+from sdax import AsyncTask, TaskFunction, RetryableException
 from sdax.sdax_core import AsyncDagTaskProcessor
 
-# Define tasks and dependencies by name
-analyzer = TaskAnalyzer()
-analyzer.add_task(AsyncTask(name="A", pre_execute=TaskFunction(lambda c: ...)), depends_on=())
-analyzer.add_task(AsyncTask(name="B", pre_execute=TaskFunction(lambda c: ...)), depends_on=("A",))
-analyzer.add_task(AsyncTask(name="C", execute=TaskFunction(lambda c: ...)), depends_on=("A",))
-analyzer.add_task(AsyncTask(name="D", post_execute=TaskFunction(lambda c: ...)), depends_on=("B","C"))
+@dataclass
+class DatabaseContext:
+    connection: Any = None
+    user_data: dict = field(default_factory=dict)
+    cache: dict = field(default_factory=dict)
 
-# Build immutable analysis and processor
-analysis = analyzer.analyze()
-processor = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+async def connect_db(ctx: DatabaseContext):
+    ctx.connection = await create_connection()
 
-# Run with your context object
-# await processor.process_tasks(ctx)
+async def load_user(ctx: DatabaseContext):
+    ctx.user_data = await ctx.connection.fetch_user()
+
+async def load_cache(ctx: DatabaseContext):
+    ctx.cache = await redis_client.get_cache()
+
+async def process_data(ctx: DatabaseContext):
+    # Process user data with cache
+    result = process_user_data(ctx.user_data, ctx.cache)
+    return result
+
+async def cleanup_db(ctx: DatabaseContext):
+    if ctx.connection:
+        await ctx.connection.close()
+
+# Complex dependency graph with fluent builder
+processor = (
+    AsyncDagTaskProcessor[DatabaseContext]
+    .builder()
+    .add_task(
+        AsyncTask(
+            name="ConnectDB", 
+            pre_execute=TaskFunction(connect_db, timeout=5.0, retries=2)
+        ), 
+        depends_on=()
+    )
+    .add_task(
+        AsyncTask(
+            name="LoadUser", 
+            execute=TaskFunction(load_user, retryable_exceptions=(ConnectionError,))
+        ), 
+        depends_on=("ConnectDB",)
+    )
+    .add_task(
+        AsyncTask(
+            name="LoadCache", 
+            execute=TaskFunction(load_cache, timeout=3.0)
+        ), 
+        depends_on=("ConnectDB",)
+    )
+    .add_task(
+        AsyncTask(
+            name="ProcessData", 
+            execute=TaskFunction(process_data)
+        ), 
+        depends_on=("LoadUser", "LoadCache")
+    )
+    .add_task(
+        AsyncTask(
+            name="CleanupDB", 
+            post_execute=TaskFunction(cleanup_db)
+        ), 
+        depends_on=("ConnectDB",)
+    )
+    .build()
+)
+
+# await processor.process_tasks(DatabaseContext())
 ```
 
 Key properties:
@@ -210,13 +292,14 @@ Each task can define up to 3 optional phases:
 
 ## Performance
 
-**Benchmarks** (1,000 zero-work tasks):
+**Benchmarks** (1,000 zero-work tasks, best of 10 runs):
 
 | Python | Raw asyncio (ms) | Single level (ms) | Multi level (ms) | Three phases (ms) |
 |--------|-------------------|-------------------|------------------|-------------------|
-| 3.14rc | 4.74 | 7.63 | 9.87 | 32.12 |
-| 3.13   | 5.75 | 9.44 | 7.09 | 32.37 |
-| 3.11   | 7.53 | 17.01 | 15.29 | 61.21 |
+| 3.14rc | 4.60 | 6.43 | 6.49 | 35.07 |
+| 3.13.1 | 4.39 | 6.53 | 6.09 | 36.49 |
+| 3.12   | 6.11 | 7.32 | 6.90 | 42.10 |
+| 3.11   | 5.11 | 13.38 | 13.04 | 53.37 |
 
 Notes:
 - Absolute numbers vary by machine; relative ordering is consistent across runs.
@@ -273,13 +356,6 @@ Notes:
        return ctx.results
    ```
 
-### ❌ Not Suitable For
-
-- Simple sequential operations (just use `await`)
-- Fire-and-forget background tasks (use `asyncio.create_task`)
-- Distributed workflows (use Celery, Airflow)
-- Event-driven systems (use message queues)
-
 ## Error Handling
 
 Tasks can fail at any phase. The framework:
@@ -332,6 +408,53 @@ AsyncTask(
 - The `uniform(0.5, 1.0)` jitter prevents thundering herd
 
 **Note:** `AsyncTask` and `TaskFunction` are frozen dataclasses, ensuring immutability and thread-safety. Once created, they cannot be modified.
+
+### Task Group Integration
+
+Tasks can access the underlying `SdaxTaskGroup` for creating subtasks:
+
+```python
+from sdax import SdaxTaskGroup
+
+async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
+    # Create subtasks using the task group
+    subtask1 = tg.create_task(subtask_a(), name="subtask_a")
+    subtask2 = tg.create_task(subtask_b(), name="subtask_b")
+    
+    # Wait for both subtasks to complete
+    result1, result2 = await asyncio.gather(subtask1, subtask2)
+    return result1 + result2
+
+AsyncTask(
+    name="ParentTask",
+    execute=TaskFunction(
+        function=parent_task,
+        has_task_group_argument=True  # Enable tg parameter
+    )
+)
+```
+
+### Retryable Exceptions
+
+By default, tasks will retry on these exceptions:
+- `TimeoutError`
+- `ConnectionError` 
+- `RetryableException` (custom base class)
+
+You can customize which exceptions trigger retries:
+
+```python
+from sdax import RetryableException
+
+class CustomRetryableError(RetryableException):
+    pass
+
+TaskFunction(
+    function=my_function,
+    retries=3,
+    retryable_exceptions=(TimeoutError, CustomRetryableError)  # Custom retry logic
+)
+```
 
 ### Shared Context
 

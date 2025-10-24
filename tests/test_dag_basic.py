@@ -15,21 +15,22 @@ async def _dummy(ctx):
 
 class TestDagBasic(unittest.TestCase):
     def test_builds_from_analysis_and_waves_simple(self):
-        analyzer = TaskAnalyzer()
-        analyzer.add_task(
+        builder = AsyncDagTaskProcessor.builder()
+        builder.add_task(
             AsyncTask(name="A", pre_execute=TaskFunction(function=_dummy)), depends_on=()
         )
-        analyzer.add_task(
+        builder.add_task(
             AsyncTask(name="B", pre_execute=TaskFunction(function=_dummy)), depends_on=()
         )
-        analyzer.add_task(
+        builder.add_task(
             AsyncTask(name="C", execute=TaskFunction(function=_dummy)), depends_on=("A", "B")
         )
-        analyzer.add_task(
+        builder.add_task(
             AsyncTask(name="D", post_execute=TaskFunction(function=_dummy)), depends_on=("C",)
         )
 
-        analysis = analyzer.analyze()
+        proc = builder.build()
+        analysis = proc.analysis
 
         pre_graph = analysis.pre_execute_graph
         self.assertEqual(len(pre_graph.waves), 1)
@@ -41,14 +42,10 @@ class TestDagBasic(unittest.TestCase):
         self.assertEqual(post_graph.waves[0].tasks, ("D",))
         self.assertEqual(post_graph.waves[0].depends_on_tasks, ())
 
-        proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
-        self.assertIs(proc.analysis, analysis)
 
     def test_process_tasks_not_implemented(self):
         async def run():
-            analyzer = TaskAnalyzer()
-            analysis = analyzer.analyze()
-            proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+            proc = AsyncDagTaskProcessor.builder().build()
             await proc.process_tasks(ctx=None)
 
         asyncio.run(run())
@@ -76,21 +73,20 @@ class TestDagBasic(unittest.TestCase):
             ctx.order.append("post:C")
 
         async def run():
-            analyzer = TaskAnalyzer()
+            builder = AsyncDagTaskProcessor.builder()
             # Pre-only A, B
-            analyzer.add_task(
+            builder.add_task(
                 AsyncTask(name="A", pre_execute=TaskFunction(function=pre_A)), depends_on=()
             )
-            analyzer.add_task(
+            builder.add_task(
                 AsyncTask(name="B", pre_execute=TaskFunction(function=pre_B)), depends_on=("A",)
             )
             # Post-only C
-            analyzer.add_task(
+            builder.add_task(
                 AsyncTask(name="C", post_execute=TaskFunction(function=post_C)), depends_on=("B",)
             )
 
-            analysis = analyzer.analyze()
-            proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+            proc = builder.build()
             ctx = Ctx()
             await proc.process_tasks(ctx=ctx)
 
@@ -115,12 +111,11 @@ class TestDagBasic(unittest.TestCase):
             ctx.results.append("X")
 
         async def run():
-            analyzer = TaskAnalyzer()
-            analyzer.add_task(
+            builder = AsyncDagTaskProcessor.builder()
+            builder.add_task(
                 AsyncTask(name="X", execute=TaskFunction(function=exec_X)), depends_on=()
             )
-            analysis = analyzer.analyze()
-            proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+            proc = builder.build()
             ctx = Ctx()
             await proc.process_tasks(ctx=ctx)
 
@@ -147,25 +142,26 @@ class TestDagBasic(unittest.TestCase):
             ctx.order.append("post:LEAF")
 
         async def run():
-            analyzer = TaskAnalyzer()
+            builder = AsyncDagTaskProcessor.builder()
             # Create a small DAG: two roots -> mid -> leaf
-            analyzer.add_task(
+            builder.add_task(
                 AsyncTask(name="R1", pre_execute=TaskFunction(function=lambda c: pre_r(c, "R1"))),
                 depends_on=(),
             )
-            analyzer.add_task(
+            builder.add_task(
                 AsyncTask(name="R2", pre_execute=TaskFunction(function=lambda c: pre_r(c, "R2"))),
                 depends_on=(),
             )
-            analyzer.add_task(
-                AsyncTask(name="MID", execute=TaskFunction(function=exec_mid)), depends_on=("R1", "R2")
+            builder.add_task(
+                AsyncTask(name="MID", execute=TaskFunction(function=exec_mid)),
+                depends_on=("R1", "R2")
             )
-            analyzer.add_task(
-                AsyncTask(name="LEAF", post_execute=TaskFunction(function=post_leaf)), depends_on=("MID",)
+            builder.add_task(
+                AsyncTask(name="LEAF", post_execute=TaskFunction(function=post_leaf)),
+                depends_on=("MID",)
             )
 
-            analysis = analyzer.analyze()
-            proc = AsyncDagTaskProcessor.builder().from_analysis(analysis).build()
+            proc = builder.build()
             ctx = Ctx()
             await proc.process_tasks(ctx=ctx)
 

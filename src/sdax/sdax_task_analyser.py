@@ -145,7 +145,7 @@ class TaskAnalysis(Generic[T]):
 
 
 @dataclass
-class TaskAnalyzer:
+class TaskAnalyzer(Generic[T]):
     """Builds wave schedules from a task dependency graph.
 
     Responsibilities:
@@ -155,7 +155,7 @@ class TaskAnalyzer:
     - Provide immutable analysis + convenience metadata for the runtime.
     """
 
-    tasks: Dict[str, AsyncTask] = field(default_factory=dict)
+    tasks: Dict[str, AsyncTask[T]] = field(default_factory=dict)
     dependencies: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # Pre-exec metadata storage for analyze() output
     _pre_wave_index_by_task: Dict[str, int] = field(default_factory=dict)
@@ -164,9 +164,9 @@ class TaskAnalyzer:
 
     def add_task(
         self,
-        task: AsyncTask,
+        task: AsyncTask[T],
         depends_on: Tuple[str, ...] = (),
-    ) -> "TaskAnalyzer":
+    ) -> "TaskAnalyzer[T]":
         """Add a task to the analyzer.
 
         Args:
@@ -186,7 +186,7 @@ class TaskAnalyzer:
         self.dependencies[task.name] = depends_on
         return self
 
-    def analyze(self) -> TaskAnalysis:
+    def analyze(self) -> TaskAnalysis[T]:
         """Analyze the task graph and build execution waves.
 
         Returns:
