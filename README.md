@@ -10,9 +10,9 @@
 It is ideal for building the internal logic of a single, fast operation, such as a complex API endpoint, where multiple dependent I/O calls (to databases, feature flags, or other services) must be reliably initialized, executed, and torn down.
 
 **Links:**
-- 📦 [PyPI Package](https://pypi.org/project/sdax/)
-- 💻 [GitHub Repository](https://github.com/owebeeone/sdax)
-- 🐛 [Issue Tracker](https://github.com/owebeeone/sdax/issues)
+- [PyPI Package](https://pypi.org/project/sdax/)
+- [GitHub Repository](https://github.com/owebeeone/sdax)
+- [Issue Tracker](https://github.com/owebeeone/sdax/issues)
 
 ## Key Features
 
@@ -124,7 +124,7 @@ processor = (
 
 ## Important: Cleanup Guarantees & Resource Management
 
-**⚠️ Critical Behavior**: `post_execute` runs for **any task whose `pre_execute` was started**, even if:
+**Critical Behavior (warning):** `post_execute` runs for **any task whose `pre_execute` was started**, even if:
 - `pre_execute` raised an exception
 - `pre_execute` was cancelled (due to a sibling task failure)
 - `pre_execute` timed out
@@ -145,10 +145,10 @@ async def acquire_lock(ctx: TaskContext):
     ctx.lock_acquired = True
 
 async def release_lock(ctx: TaskContext):
-    # ✅ GOOD: Check if we actually acquired the lock
+    # GOOD: Check if we actually acquired the lock
     if ctx.lock_acquired and ctx.lock:
         await ctx.lock.release()
-    # ✅ GOOD: Or use try/except for safety
+    # GOOD: Or use try/except for safety
     try:
         if ctx.lock:
             await ctx.lock.release()
@@ -263,14 +263,13 @@ Failure semantics:
 Tasks execute in a strict "elevator up, elevator down" pattern:
 
 ```
-Level 1: [A-pre, B-pre, C-pre] ─┐
-                                 ├─→ (parallel)
-Level 2: [D-pre, E-pre] ────────┘
-                                 ├─→ (parallel)  
-Execute: [A-exec, B-exec, D-exec, E-exec] ─┘
-                                 
-Teardown: ┌─ [D-post, E-post] (parallel)
-          └─ [A-post, B-post, C-post] (parallel)
+Level 1: [A-pre, B-pre, C-pre] --> (parallel)
+Level 2: [D-pre, E-pre]        --> (parallel)
+Execute: [A-exec, B-exec, D-exec, E-exec]
+
+Teardown:
+    [D-post, E-post] (parallel)
+    [A-post, B-post, C-post] (parallel)
 ```
 
 **Key Rules**:
@@ -307,14 +306,14 @@ Notes:
 - Overhead remains small vs realistic I/O-bound tasks (10ms+ per op).
 
 **When to use**:
-- ✅ I/O-bound workflows (database, HTTP, file operations)
-- ✅ Complex multi-step operations with dependencies
-- ✅ Multiple levels with reasonable task counts (3 or more tasks/level)
-- ✅ Tasks where guaranteed cleanup is critical
+- I/O-bound workflows (database, HTTP, file operations)
+- Complex multi-step operations with dependencies
+- Multiple levels with a reasonable number of tasks (three or more per level)
+- Scenarios where guaranteed cleanup is critical
 
 ## Use Cases
 
-### ✅ Perfect For
+### Perfect For
 
 1. **Complex API Endpoints**
    ```python
@@ -496,7 +495,7 @@ await asyncio.gather(
 )
 ```
 
-**⚠️ Critical Requirements for Concurrent Execution:**
+**Critical requirements for concurrent execution:**
 
 1. **Context Must Be Self-Contained**
    - Your context must fully contain all request-specific state
@@ -504,13 +503,13 @@ await asyncio.gather(
    - Each execution gets its own isolated context instance
 
 2. **Task Functions Must Be Pure (No External Side Effects)**
-   - ❌ **BAD**: Writing to shared files, databases, or caches without coordination
-   - ❌ **BAD**: Modifying global state or class variables
-   - ❌ **BAD**: Using non-isolated external resources
-   - ✅ **GOOD**: Reading from the context
-   - ✅ **GOOD**: Writing to the context
-   - ✅ **GOOD**: Making HTTP requests (each execution independent)
-   - ✅ **GOOD**: Database operations with per-execution connections
+   - BAD: Writing to shared files, databases, or caches without coordination
+   - BAD: Modifying global state or class variables
+   - BAD: Using non-isolated external resources
+   - GOOD: Reading from the context
+   - GOOD: Writing to the context
+   - GOOD: Making HTTP requests (each execution independent)
+   - GOOD: Database operations with per-execution connections
 
 3. **Example - Safe Concurrent Execution:**
 
@@ -545,7 +544,7 @@ processor.add_task(
 4. **Example - UNSAFE Concurrent Execution:**
 
 ```python
-# ❌ WRONG - shared state causes race conditions
+# BAD - shared state causes race conditions
 SHARED_CACHE = {}
 
 async def unsafe_task(ctx: RequestContext):
@@ -568,17 +567,17 @@ async def unsafe_task(ctx: RequestContext):
 
 Run the test suite:
 ```bash
-pytest tests/ -v
+pytest sdax/tests -v
 ```
 
 Performance benchmarks:
 ```bash
-python tests/test_performance.py -v
+python sdax/tests/test_performance.py -v
 ```
 
 Monte Carlo stress testing (runs ~2,750 tasks with random failures):
 ```bash
-python tests/test_monte_carlo.py -v
+python sdax/tests/test_monte_carlo.py -v
 ```
 
 ## Comparison to Alternatives
@@ -588,10 +587,10 @@ python tests/test_monte_carlo.py -v
 | Setup complexity | Minimal | High | Very High | None |
 | External dependencies | None | Redis/RabbitMQ | PostgreSQL/MySQL | None |
 | Throughput | ~137k tasks/sec | ~500 tasks/sec | ~50 tasks/sec | ~174k ops/sec |
-| Overhead | ~7µs/task | Varies | High | Minimal |
+| Overhead | ~7us/task | Varies | High | Minimal |
 | Use case | In-process workflows | Distributed tasks | Complex DAGs | Simple async |
-| Guaranteed cleanup | ✅ Yes | ❌ No | ❌ No | Manual |
-| Level-based execution | ✅ Yes | ❌ No | ✅ Yes | Manual |
+| Guaranteed cleanup | Yes | No | No | Manual |
+| Level-based execution | Yes | No | Yes | Manual |
 
 ## License
 
