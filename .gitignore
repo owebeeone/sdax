@@ -21,3 +21,7 @@ build/
 # IDEs
 .idea/
 .vscode/
+
+.venv*
+jnk.*
+uv.lock
