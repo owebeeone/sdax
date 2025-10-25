@@ -63,6 +63,74 @@ class PhaseContext(Generic[T]):
     post_exceptions: list[BaseException] = field(default_factory=list)
     synthetic_pre_started: set[str] = field(default_factory=set)
 
+    @dataclass(slots=True)
+    class _WavePhaseRunner:
+        wave_lookup: Dict[int, ExecutionWave]
+        targets: list[int]
+        completed: list[int]
+        task_to_consumer_waves: Mapping[str, Sequence[int]]
+        should_run: Callable[[str], bool]
+        run_task: Callable[[str, _TaskGroupWrapper], Awaitable[None]]
+        propagate_exceptions: bool
+        complete_on_error: bool
+        scheduled: set[int] = field(default_factory=set)
+        exceptions: list[BaseException] = field(default_factory=list)
+        tg_wrapper: _TaskGroupWrapper | None = None
+
+        def _require_task_group(self) -> _TaskGroupWrapper:
+            if self.tg_wrapper is None:
+                raise RuntimeError("Task group wrapper has not been initialized.")
+            return self.tg_wrapper
+
+        async def execute(self, root_wave_id: int) -> list[BaseException]:
+            async with asyncio.TaskGroup() as tg:
+                self.tg_wrapper = _TaskGroupWrapper(task_group=tg)
+                await self.schedule_wave(root_wave_id)
+            return self.exceptions
+
+        async def schedule_wave(self, idx: int) -> None:
+            if idx in self.scheduled:
+                return
+            self.scheduled.add(idx)
+            wave = self.wave_lookup.get(idx)
+            if wave is None:
+                return
+
+            has_runnable = False
+            tg_wrapper = self._require_task_group()
+            for task_name in wave.tasks:
+                if not self.should_run(task_name):
+                    await self.on_task_complete(task_name)
+                    continue
+                has_runnable = True
+                tg_wrapper.create_task(self.run_wrapper(task_name))
+            if not has_runnable:
+                return
+
+        async def on_task_complete(self, task_name: str) -> None:
+            for consumer_idx in self.task_to_consumer_waves.get(task_name, ()):
+                if consumer_idx >= len(self.completed):
+                    continue
+                self.completed[consumer_idx] += 1
+                if self.completed[consumer_idx] >= self.targets[consumer_idx]:
+                    await self.schedule_wave(consumer_idx)
+
+        async def run_wrapper(self, task_name: str) -> None:
+            tg_wrapper = self._require_task_group()
+            try:
+                await self.run_task(task_name, tg_wrapper)
+            except BaseException as exc:
+                if not self.propagate_exceptions:
+                    self.exceptions.append(exc)
+                    if self.complete_on_error:
+                        await self.on_task_complete(task_name)
+                    return
+                if self.complete_on_error:
+                    await self.on_task_complete(task_name)
+                raise
+            else:
+                await self.on_task_complete(task_name)
+
     def create_phase(self, phase_id: PhaseId) -> Phase[T]:
         runner = self._phase_runner_map().get(phase_id)
         if runner is None:
@@ -221,56 +289,18 @@ class PhaseContext(Generic[T]):
             targets.extend([0] * (max_wave_index - len(targets)))
         completed = [0] * len(targets)
 
-        scheduled: set[int] = set()
-        exceptions: list[BaseException] = []
-        tg_ref: Dict[str, _TaskGroupWrapper] = {}
+        runner = PhaseContext._WavePhaseRunner(
+            wave_lookup=wave_lookup,
+            targets=targets,
+            completed=completed,
+            task_to_consumer_waves=task_to_consumer_waves,
+            should_run=should_run,
+            run_task=run_task,
+            propagate_exceptions=propagate_exceptions,
+            complete_on_error=complete_on_error,
+        )
 
-        async def schedule_wave(idx: int):
-            if idx in scheduled:
-                return
-            scheduled.add(idx)
-            wave = wave_lookup.get(idx)
-            if wave is None:
-                return
-
-            has_runnable = False
-            for task_name in wave.tasks:
-                if not should_run(task_name):
-                    await on_task_complete(task_name)
-                    continue
-                has_runnable = True
-                tg_ref["tg"].create_task(run_wrapper(task_name))
-            if not has_runnable:
-                return
-
-        async def on_task_complete(task_name: str):
-            for consumer_idx in task_to_consumer_waves.get(task_name, ()):
-                if consumer_idx >= len(completed):
-                    continue
-                completed[consumer_idx] += 1
-                if completed[consumer_idx] >= targets[consumer_idx]:
-                    await schedule_wave(consumer_idx)
-
-        async def run_wrapper(task_name: str):
-            try:
-                await run_task(task_name, tg_ref["tg"])
-            except BaseException as exc:
-                if not propagate_exceptions:
-                    exceptions.append(exc)
-                    if complete_on_error:
-                        await on_task_complete(task_name)
-                    return
-                if complete_on_error:
-                    await on_task_complete(task_name)
-                raise
-            else:
-                await on_task_complete(task_name)
-
-        async with asyncio.TaskGroup() as tg:
-            tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
-            await schedule_wave(root_wave_id)
-
-        return exceptions
+        return await runner.execute(root_wave_id)
 
     async def _execute_with_retry(
         self,
