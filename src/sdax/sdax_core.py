@@ -430,6 +430,108 @@ class AsyncDagTaskProcessorBuilder(Generic[T]):
         return AsyncDagTaskProcessor(analysis=analysis)
 
 
+@dataclass(slots=True)
+class AsyncPhaseRunner(Generic[T]):
+    """Async context manager that drives phase execution for a processor run."""
+
+    processor: "AsyncDagTaskProcessor[T]"
+    ctx: T
+    _phase_ctx: PhaseContext[T] = field(init=False)
+    _current_phase: Phase[T] | None = field(init=False, default=None)
+    _next_phase_id: PhaseId | None = field(init=False, default=None)
+    _last_phase_id: PhaseId | None = field(init=False, default=None)
+    _closed: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        analysis = self.processor.analysis
+        self._phase_ctx = PhaseContext[T](
+            exec_ctx=_ExecutionContext(user_context=self.ctx),
+            analysis=analysis,
+            tasks=dict(analysis.tasks),
+        )
+        self._current_phase = self._phase_ctx.create_phase(PhaseId.PRE_EXEC)
+        self._next_phase_id = (
+            self._current_phase.phase_id if self._current_phase is not None else None
+        )
+
+    async def __aenter__(self) -> "AsyncPhaseRunner[T]":
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb,
+    ) -> bool:
+        try:
+            await self.aclose()
+            self.raise_failures()
+        finally:
+            self._closed = True
+        return False
+
+    async def run_next(self) -> bool:
+        """Execute the current phase and prepare the next one.
+
+        Returns:
+            bool: True if another phase remains to be executed, False otherwise.
+
+        Raises:
+            RuntimeError: If called after the runner has been closed.
+        """
+        if self._closed:
+            raise RuntimeError("Attempted to run phases on a closed processor.")
+        if self._current_phase is None:
+            return False
+
+        current = self._current_phase
+        self._last_phase_id = current.phase_id
+        next_phase_id = await current.run(self._phase_ctx)
+        self._current_phase = (
+            self._phase_ctx.create_phase(next_phase_id) if next_phase_id is not None else None
+        )
+        self._next_phase_id = (
+            self._current_phase.phase_id if self._current_phase is not None else None
+        )
+        return self._current_phase is not None
+
+    async def aclose(self) -> None:
+        """Ensure all remaining phases are executed."""
+        if self._closed:
+            return
+        while self._current_phase is not None:
+            if not await self.run_next():
+                break
+        self._closed = True
+
+    def next_phase_id(self) -> PhaseId | None:
+        """Return the identifier of the next phase scheduled to run."""
+        return self._next_phase_id
+
+    def last_phase_id(self) -> PhaseId | None:
+        """Return the identifier of the most recently executed phase."""
+        return self._last_phase_id
+
+    def has_failures(self) -> bool:
+        ctx = self._phase_ctx
+        return bool(
+            ctx.pre_exception or ctx.exec_exception or ctx.post_exceptions
+        )
+
+    def failures(self) -> list[BaseException]:
+        ctx = self._phase_ctx
+        failures: list[BaseException] = []
+        if ctx.pre_exception:
+            failures.append(ctx.pre_exception)
+        if ctx.exec_exception:
+            failures.append(ctx.exec_exception)
+        failures.extend(ctx.post_exceptions)
+        return failures
+
+    def raise_failures(self) -> None:
+        self._phase_ctx.raise_failures()
+
+
 @dataclass(frozen=True)
 class AsyncDagTaskProcessor(Generic[T]):
     """Immutable DAG executor that consumes TaskAnalysis graphs.
@@ -447,21 +549,13 @@ class AsyncDagTaskProcessor(Generic[T]):
         return AsyncDagTaskProcessorBuilder[T]()
 
     async def process_tasks(self, ctx: T):
-        phase, phase_ctx = self.initial_phase(ctx)
-        while phase is not None:
-            next_phase_id = await phase.run(phase_ctx)
-            phase = phase_ctx.create_phase(next_phase_id) if next_phase_id is not None else None
+        async with self.open(ctx) as runner:
+            while await runner.run_next():
+                pass
 
-        phase_ctx.raise_failures()
-
-    def initial_phase(self, ctx: T) -> Tuple[Phase[T], PhaseContext[T]]:
-        phase_ctx = PhaseContext[T](
-            exec_ctx=_ExecutionContext(user_context=ctx),
-            analysis=self.analysis,
-            tasks=dict(self.analysis.tasks),
-        )
-
-        return phase_ctx.create_phase(PhaseId.PRE_EXEC), phase_ctx
+    def open(self, ctx: T) -> AsyncPhaseRunner[T]:
+        """Create a phase runner for advanced control over execution."""
+        return AsyncPhaseRunner(self, ctx)
 
 
 @dataclass
