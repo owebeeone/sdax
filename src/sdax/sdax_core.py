@@ -237,7 +237,7 @@ class AsyncDagTaskProcessor(Generic[T]):
         ctx = exec_ctx.user_context
 
         # If retryable_exceptions is empty, no retries should occur
-        if not retryable_exceptions:
+        if not retryable_exceptions or retries <= 0:
             if timeout is None:
                 await task_func_obj.call(ctx, tg_wrapper)
             else:

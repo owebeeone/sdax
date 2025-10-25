@@ -36,7 +36,7 @@ class TaskFunction(Generic[T]):
     """
     function: Callable[[T], Awaitable[Any]] \
             | Callable[[T, SdaxTaskGroup],  Awaitable[Any]]
-    timeout: float | None = 2.0  # None means no timeout
+    timeout: float | None = None  # None means no timeout
     retries: int = 0
     initial_delay: float = 1.0  # Initial retry delay in seconds
     backoff_factor: float = 2.0
