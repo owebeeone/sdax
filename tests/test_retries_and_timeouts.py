@@ -4,7 +4,20 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict
 
-from sdax import AsyncTask, AsyncTaskProcessor, TaskFunction
+from sdax import AsyncTask, AsyncTaskProcessor, SdaxExecutionError, TaskFunction
+
+
+def _flatten_exceptions(exc: BaseException) -> list[BaseException]:
+    """Return leaf exceptions from nested ExceptionGroups."""
+    leaves: list[BaseException] = []
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ExceptionGroup):
+            stack.extend(current.exceptions)
+        else:
+            leaves.append(current)
+    return leaves
 
 
 @dataclass
@@ -73,7 +86,7 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
             .build()
         )
 
-        with self.assertRaises(ExceptionGroup):
+        with self.assertRaises(SdaxExecutionError):
             await processor.process_tasks(ctx)
 
         # It should try once, then retry twice, for a total of 3 attempts
@@ -101,11 +114,13 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
             .build()
         )
 
-        with self.assertRaises(ExceptionGroup) as cm:
+        with self.assertRaises(SdaxExecutionError) as cm:
             await processor.process_tasks(ctx)
 
         # Check that the underlying exception is indeed a TimeoutError
-        self.assertIsInstance(cm.exception.exceptions[0], asyncio.TimeoutError)
+        leaves = _flatten_exceptions(cm.exception)
+        self.assertEqual(len(leaves), 1)
+        self.assertIsInstance(leaves[0], asyncio.TimeoutError)
 
     async def test_no_timeout_with_none(self):
         """Verify that timeout=None allows tasks to run indefinitely."""
@@ -163,11 +178,12 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
         try:
             await processor.process_tasks(ctx)
             self.fail("Expected an exception to be raised")
-        except ExceptionGroup as eg:
+        except SdaxExecutionError as eg:
             # Check that the underlying exception is ValueError
-            self.assertEqual(len(eg.exceptions), 1)
-            self.assertIsInstance(eg.exceptions[0], ValueError)
-            self.assertEqual(str(eg.exceptions[0]), "This always fails")
+            leaves = _flatten_exceptions(eg)
+            self.assertEqual(len(leaves), 1)
+            self.assertIsInstance(leaves[0], ValueError)
+            self.assertEqual(str(leaves[0]), "This always fails")
 
         # Should only have been called once (no retries)
         self.assertEqual(ATTEMPTS["always_fails"], 1)
@@ -242,14 +258,91 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
         try:
             await processor.process_tasks(ctx)
             self.fail("Expected an exception to be raised")
-        except ExceptionGroup as eg:
+        except SdaxExecutionError as eg:
             # Check that the underlying exception is CustomNonRetryableError
-            self.assertEqual(len(eg.exceptions), 1)
-            self.assertIsInstance(eg.exceptions[0], CustomNonRetryableError)
-            self.assertEqual(str(eg.exceptions[0]), "Non-retryable error")
+            leaves = _flatten_exceptions(eg)
+            self.assertEqual(len(leaves), 1)
+            self.assertIsInstance(leaves[0], CustomNonRetryableError)
+            self.assertEqual(str(leaves[0]), "Non-retryable error")
 
         # Should only have been called once (no retries)
         self.assertEqual(ATTEMPTS["fails_with_non_retryable"], 1)
+
+    async def test_exception_group_retryable_exceptions(self):
+        """Ensure ExceptionGroups containing only retryable exceptions are retried."""
+        ctx = TaskContext()
+
+        class CustomRetryableError(Exception):
+            pass
+
+        async def fails_with_group(context: TaskContext):
+            global ATTEMPTS
+            ATTEMPTS["fails_with_group"] += 1
+            if ATTEMPTS["fails_with_group"] < 3:
+                raise ExceptionGroup("grouped failure", [CustomRetryableError("retry me")])
+            context.data["succeeded"] = True
+
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="GroupRetryTask",
+                    execute=TaskFunction(
+                        function=fails_with_group,
+                        retries=3,
+                        retryable_exceptions=(CustomRetryableError,),
+                    ),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        # Should succeed after retries even though ExceptionGroup is raised
+        await processor.process_tasks(ctx)
+        self.assertTrue(ctx.data.get("succeeded"))
+        self.assertEqual(ATTEMPTS["fails_with_group"], 3)
+
+    async def test_exception_group_with_non_retryable_fails(self):
+        """Ensure mixed ExceptionGroups do not trigger retries."""
+        ctx = TaskContext()
+
+        class CustomRetryableError(Exception):
+            pass
+
+        class CustomNonRetryableError(Exception):
+            pass
+
+        async def fails_with_mixed_group(context: TaskContext):
+            global ATTEMPTS
+            ATTEMPTS["fails_with_mixed_group"] += 1
+            raise ExceptionGroup(
+                "mixed failure",
+                [CustomRetryableError("retryable"), CustomNonRetryableError("non-retryable")],
+            )
+
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    name="MixedGroupTask",
+                    execute=TaskFunction(
+                        function=fails_with_mixed_group,
+                        retries=3,
+                        retryable_exceptions=(CustomRetryableError,),
+                    ),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        with self.assertRaises(SdaxExecutionError) as cm:
+            await processor.process_tasks(ctx)
+
+        leaves = _flatten_exceptions(cm.exception)
+        self.assertTrue(any(isinstance(exc, CustomNonRetryableError) for exc in leaves))
+        self.assertEqual(ATTEMPTS["fails_with_mixed_group"], 1)
 
 
 if __name__ == "__main__":

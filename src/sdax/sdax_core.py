@@ -18,6 +18,19 @@ from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
 T = TypeVar("T")
 
 
+class SdaxExecutionError(ExceptionGroup):
+    """Raised when one or more SDAX task phases fail."""
+
+
+def _is_retryable_exception(exc: BaseException, retryable: tuple[type[BaseException], ...]) -> bool:
+    """Return True if the exception (or its aggregated children) are retryable."""
+    if not retryable:
+        return False
+    if isinstance(exc, ExceptionGroup):
+        return all(_is_retryable_exception(child, retryable) for child in exc.exceptions)
+    return isinstance(exc, retryable)
+
+
 @dataclass
 class _ExecutionContext(Generic[T]):
     """Runtime state for a single execution of the processor.
@@ -221,9 +234,7 @@ class PhaseContext(Generic[T]):
         exceptions.extend(self.post_exceptions)
         if not exceptions:
             return
-        if len(exceptions) == 1:
-            raise exceptions[0]
-        raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
+        raise SdaxExecutionError("SDAX task execution failed", exceptions)
 
     def _pre_should_run(self, name: str) -> bool:
         task = self.tasks[name]
@@ -317,12 +328,6 @@ class PhaseContext(Generic[T]):
         retryable_exceptions = task_func_obj.retryable_exceptions
         ctx = exec_ctx.user_context
 
-        if not retryable_exceptions:
-            if timeout is None:
-                await task_func_obj.call(ctx, tg_wrapper)
-            else:
-                await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
-            return
         for attempt in range(retries + 1):
             try:
                 if timeout is None:
@@ -330,8 +335,8 @@ class PhaseContext(Generic[T]):
                 else:
                     await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
                 return
-            except retryable_exceptions as _:
-                if attempt >= retries:
+            except BaseException as exc:
+                if not _is_retryable_exception(exc, retryable_exceptions) or attempt >= retries:
                     raise
                 delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
                 await asyncio.sleep(delay)
@@ -394,14 +399,22 @@ class AsyncTaskProcessor(Generic[T], ABC):
     async def process_tasks(self, ctx: T):
         pass
 
+    @abstractmethod
+    def open(self, ctx: T) -> "AsyncPhaseRunner[T]":
+        pass
+
     @staticmethod
     def builder() -> AsyncTaskProcessorBuilder[T]:
+        """Create a builder for level-based / Elevator adapter task processor."""
         return AsyncDagLevelAdapterBuilder[T]()
 
 
 @dataclass
 class AsyncDagTaskProcessorBuilder(Generic[T]):
-    """Builder for DAG-based task processor using precomputed TaskAnalysis."""
+    """Builder for DAG-based task processor.
+    This uses a TaskAnalyzer to build a TaskAnalysis graph, which is then used to 
+    create an AsyncDagTaskProcessor.
+    """
 
     taskAnalyzer: TaskAnalyzer[T] = field(default_factory=TaskAnalyzer)
 
@@ -513,12 +526,14 @@ class AsyncPhaseRunner(Generic[T]):
         return self._last_phase_id
 
     def has_failures(self) -> bool:
+        """Return True if any exceptions occurred during execution."""
         ctx = self._phase_ctx
         return bool(
             ctx.pre_exception or ctx.exec_exception or ctx.post_exceptions
         )
 
     def failures(self) -> list[BaseException]:
+        """Return a list of all exceptions that occurred during execution."""
         ctx = self._phase_ctx
         failures: list[BaseException] = []
         if ctx.pre_exception:
@@ -529,6 +544,7 @@ class AsyncPhaseRunner(Generic[T]):
         return failures
 
     def raise_failures(self) -> None:
+        """Raise all exceptions that occurred during execution as an SdaxExecutionError."""
         self._phase_ctx.raise_failures()
 
 
@@ -546,9 +562,11 @@ class AsyncDagTaskProcessor(Generic[T]):
 
     @staticmethod
     def builder() -> AsyncDagTaskProcessorBuilder[T]:
+        """Create a builder for a new AsyncDagTaskProcessor."""
         return AsyncDagTaskProcessorBuilder[T]()
 
     async def process_tasks(self, ctx: T):
+        """Process all phases of a new execution of the processor."""
         async with self.open(ctx) as runner:
             while await runner.run_next():
                 pass

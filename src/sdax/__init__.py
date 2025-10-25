@@ -10,6 +10,7 @@ from .sdax_core import (
     AsyncDagTaskProcessor,
     AsyncDagTaskProcessorBuilder,
     AsyncTaskProcessor,
+    SdaxExecutionError,
 )
 from .tasks import AsyncTask, RetryableException, SdaxTaskGroup, TaskFunction
 
@@ -24,4 +25,5 @@ __all__ = [
     "AsyncDagTaskProcessor",
     "AsyncDagTaskProcessorBuilder",
     "AsyncDagLevelAdapterBuilder",
+    "SdaxExecutionError",
 ]
