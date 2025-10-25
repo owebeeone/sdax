@@ -4,12 +4,12 @@ SDAX core engine classes.
 This module contains the core engine classes for the SDAX framework.
 """
 
-
 import asyncio
 import random
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, Tuple, TypeVar
 
 from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
@@ -27,6 +27,32 @@ class _ExecutionContext(Generic[T]):
     """
 
     user_context: T
+
+
+class PhaseId(Enum):
+    PRE_EXEC = auto()
+    EXECUTE = auto()
+    POST_EXEC = auto()
+
+
+@dataclass(slots=True)
+class Phase(Generic[T]):
+    phase_id: PhaseId
+    run: Callable[["PhaseContext[T]"], Awaitable["Phase[T] | None"]]
+
+
+@dataclass(slots=True)
+class PhaseContext(Generic[T]):
+    processor: "AsyncDagTaskProcessor[T]"
+    exec_ctx: _ExecutionContext[T]
+    analysis: TaskAnalysis[T]
+    tasks: Dict[str, AsyncTask[T]]
+    pre_started: set[str] = field(default_factory=set)
+    pre_succeeded: set[str] = field(default_factory=set)
+    pre_exception: BaseException | None = None
+    exec_exception: BaseException | None = None
+    post_exceptions: list[BaseException] = field(default_factory=list)
+    synthetic_pre_started: set[str] = field(default_factory=set)
 
 
 class AsyncTaskProcessorBuilder(Generic[T], ABC):
@@ -108,49 +134,69 @@ class AsyncDagTaskProcessor(Generic[T]):
         return AsyncDagTaskProcessorBuilder[T]()
 
     async def process_tasks(self, ctx: T):
-        analysis = self.analysis
-        tasks_by_name: Dict[str, AsyncTask[T]] = analysis.tasks
+        phase_ctx = PhaseContext(
+            processor=self,
+            exec_ctx=_ExecutionContext(user_context=ctx),
+            analysis=self.analysis,
+            tasks=dict(self.analysis.tasks),
+        )
 
-        # Create execution context for this run
-        exec_ctx: _ExecutionContext[T] = _ExecutionContext[T](user_context=ctx)
+        phase = self._make_phase(PhaseId.PRE_EXEC)
+        while phase is not None:
+            phase = await phase.run(phase_ctx)
 
-        # -------- Pre-execute (single TaskGroup, staged by readiness) --------
-        pre_started: set[str] = set()
-        pre_succeeded: set[str] = set()
-        pre_exception: BaseException | None = None
+        self._raise_if_failures(phase_ctx)
 
+    def _make_phase(self, phase_id: PhaseId | None) -> Phase[T] | None:
+        if phase_id is None:
+            return None
+        runner_map: dict[PhaseId, Callable[[PhaseContext[T]], Awaitable[Phase[T] | None]]] = {
+            PhaseId.PRE_EXEC: self._run_pre_phase,
+            PhaseId.EXECUTE: self._run_execute_phase,
+            PhaseId.POST_EXEC: self._run_post_phase,
+        }
+        runner = runner_map.get(phase_id)
+        if runner is None:
+            return None
+        return Phase(phase_id=phase_id, run=runner)
+
+    async def _run_pre_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
+        analysis = phase_ctx.analysis
         pre_waves = analysis.pre_execute_graph.waves
-
-        def pre_should_run(name: str) -> bool:
-            return tasks_by_name[name].pre_execute is not None
-
-        async def run_pre(task_name: str, tg_wrapper: _TaskGroupWrapper):
-            task = tasks_by_name[task_name]
-            pre_started.add(task_name)
-            await self._execute_with_retry(task.pre_execute, exec_ctx, tg_wrapper)
-            pre_succeeded.add(task_name)
-
         if pre_waves:
             try:
                 await self._run_wave_phase(
+                    phase_ctx=phase_ctx,
+                    root_wave_id=analysis.pre_root_wave_id,
                     waves=pre_waves,
                     wave_dep_count=analysis.wave_dep_count,
                     task_to_consumer_waves=analysis.task_to_consumer_waves,
-                    should_run=pre_should_run,
-                    run_task=run_pre,
+                    should_run=self._pre_should_run,
+                    run_task=self._run_pre_task,
                     propagate_exceptions=True,
                     complete_on_error=False,
                 )
             except* Exception as eg:
-                pre_exception = eg
+                phase_ctx.pre_exception = eg
+        return self._make_phase(self._phase_after_pre(phase_ctx))
 
-        # -------- Execute (single TaskGroup across eligible tasks) --------
-        exec_exception: BaseException | None = None
+    def _phase_after_pre(self, phase_ctx: PhaseContext[T]) -> PhaseId:
+        if phase_ctx.pre_exception is not None:
+            return PhaseId.POST_EXEC
+        if phase_ctx.analysis.execute_task_names:
+            return PhaseId.EXECUTE
+        return PhaseId.POST_EXEC
+
+    async def _run_execute_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
+        analysis = phase_ctx.analysis
+        tasks_by_name = phase_ctx.tasks
         exec_names = analysis.execute_task_names
         exec_to_run: list[str] = []
         for name in exec_names:
-            t = tasks_by_name[name]
-            if t.pre_execute is not None and name not in pre_succeeded:
+            task = tasks_by_name.get(name)
+            if not task or task.execute is None:
+                continue
+            if task.pre_execute is not None and name not in phase_ctx.pre_succeeded:
                 continue
             exec_to_run.append(name)
 
@@ -161,66 +207,89 @@ class AsyncDagTaskProcessor(Generic[T]):
                     for name in exec_to_run:
                         tg.create_task(
                             self._execute_with_retry(
-                                tasks_by_name[name].execute, exec_ctx, tg_wrapper))
+                                tasks_by_name[name].execute, phase_ctx.exec_ctx, tg_wrapper
+                            )
+                        )
             except* Exception as eg:
-                exec_exception = eg
+                phase_ctx.exec_exception = eg
 
-        # -------- Post-execute (best-effort cleanup, per wave, isolated) --------
-        post_exceptions: list[BaseException] = []
+        return self._make_phase(PhaseId.POST_EXEC)
+
+    async def _run_post_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
+        analysis = phase_ctx.analysis
         post_waves = analysis.post_execute_graph.waves
-
-        synthetic_pre_started = self._compute_synthetic_pre_started(pre_succeeded)
-
-        async def run_post_isolated(task: AsyncTask[T]):
-            if not task.post_execute:
-                return None
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    tg_wrapper = _TaskGroupWrapper(task_group=tg)
-                    tg.create_task(
-                        self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
-            except ExceptionGroup as eg:
-                return eg
-            return None
-
-        def post_should_run(name: str) -> bool:
-            task = tasks_by_name[name]
-            if task.post_execute is None:
-                return False
-            if task.pre_execute is None:
-                return name in synthetic_pre_started
-            return name in pre_started
-
-        async def run_post(name: str, tg_wrapper: _TaskGroupWrapper):
-            task = tasks_by_name[name]
-            result = await run_post_isolated(task)
-            if isinstance(result, BaseException):
-                raise result
-
         if post_waves:
-            post_exceptions.extend(
+            phase_ctx.synthetic_pre_started = self._compute_synthetic_pre_started(
+                phase_ctx.pre_succeeded
+            )
+            phase_ctx.post_exceptions.extend(
                 await self._run_wave_phase(
+                    phase_ctx=phase_ctx,
+                    root_wave_id=analysis.post_root_wave_id,
                     waves=post_waves,
                     wave_dep_count=analysis.post_wave_dep_count,
                     task_to_consumer_waves=analysis.post_task_to_consumer_waves,
-                    should_run=post_should_run,
-                    run_task=run_post,
+                    should_run=self._post_should_run,
+                    run_task=self._run_post_task,
                     propagate_exceptions=False,
                     complete_on_error=True,
                 )
             )
+        return None
 
-        # -------- Aggregate exceptions --------
+    def _pre_should_run(self, phase_ctx: PhaseContext[T], name: str) -> bool:
+        task = phase_ctx.tasks[name]
+        return task.pre_execute is not None
+
+    async def _run_pre_task(
+        self, phase_ctx: PhaseContext[T], task_name: str, tg_wrapper: _TaskGroupWrapper
+    ):
+        task = phase_ctx.tasks[task_name]
+        phase_ctx.pre_started.add(task_name)
+        await self._execute_with_retry(task.pre_execute, phase_ctx.exec_ctx, tg_wrapper)
+        phase_ctx.pre_succeeded.add(task_name)
+
+    def _post_should_run(self, phase_ctx: PhaseContext[T], name: str) -> bool:
+        task = phase_ctx.tasks[name]
+        if task.post_execute is None:
+            return False
+        if task.pre_execute is None:
+            return name in phase_ctx.synthetic_pre_started
+        return name in phase_ctx.pre_started
+
+    async def _run_post_task(
+        self, phase_ctx: PhaseContext[T], name: str, _tg_wrapper: _TaskGroupWrapper
+    ):
+        task = phase_ctx.tasks[name]
+        result = await self._run_post_isolated(task, phase_ctx.exec_ctx)
+        if isinstance(result, BaseException):
+            raise result
+
+    async def _run_post_isolated(
+        self, task: AsyncTask[T], exec_ctx: _ExecutionContext[T]
+    ) -> BaseException | None:
+        if not task.post_execute:
+            return None
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg_wrapper = _TaskGroupWrapper(task_group=tg)
+                tg.create_task(self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
+        except ExceptionGroup as eg:
+            return eg
+        return None
+
+    def _raise_if_failures(self, phase_ctx: PhaseContext[T]) -> None:
         exceptions: list[BaseException] = []
-        if pre_exception:
-            exceptions.append(pre_exception)
-        if exec_exception:
-            exceptions.append(exec_exception)
-        exceptions.extend(post_exceptions)
-        if exceptions:
-            if len(exceptions) == 1:
-                raise exceptions[0]
-            raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
+        if phase_ctx.pre_exception:
+            exceptions.append(phase_ctx.pre_exception)
+        if phase_ctx.exec_exception:
+            exceptions.append(phase_ctx.exec_exception)
+        exceptions.extend(phase_ctx.post_exceptions)
+        if not exceptions:
+            return
+        if len(exceptions) == 1:
+            raise exceptions[0]
+        raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
 
     async def _execute_with_retry(
         self,
@@ -305,20 +374,26 @@ class AsyncDagTaskProcessor(Generic[T]):
 
     async def _run_wave_phase(
         self,
+        phase_ctx: PhaseContext[T],
         *,
+        root_wave_id: int | None,
         waves: Sequence[ExecutionWave],
         wave_dep_count: Sequence[int],
         task_to_consumer_waves: Mapping[str, Sequence[int]],
-        should_run: Callable[[str], bool],
-        run_task: Callable[[str, _TaskGroupWrapper], Awaitable[None]],
+        should_run: Callable[[PhaseContext[T], str], bool],
+        run_task: Callable[[PhaseContext[T], str, _TaskGroupWrapper], Awaitable[None]],
         propagate_exceptions: bool,
         complete_on_error: bool,
     ) -> list[BaseException]:
         """Generic wave executor used for both pre and post phases."""
         if not waves:
             return []
+        if root_wave_id is None:
+            raise ValueError("Wave execution requires a root wave id from the analyzer.")
 
         wave_lookup: Dict[int, ExecutionWave] = {wave.wave_num: wave for wave in waves}
+        if root_wave_id not in wave_lookup:
+            raise ValueError(f"Root wave id {root_wave_id} not found in wave definitions.")
         max_wave_index = max(wave_lookup) + 1 if wave_lookup else 0
 
         targets = list(wave_dep_count)
@@ -340,7 +415,7 @@ class AsyncDagTaskProcessor(Generic[T]):
 
             has_runnable = False
             for task_name in wave.tasks:
-                if not should_run(task_name):
+                if not should_run(phase_ctx, task_name):
                     await on_task_complete(task_name)
                     continue
                 has_runnable = True
@@ -359,7 +434,7 @@ class AsyncDagTaskProcessor(Generic[T]):
 
         async def run_wrapper(task_name: str):
             try:
-                await run_task(task_name, tg_ref["tg"])
+                await run_task(phase_ctx, task_name, tg_ref["tg"])
             except BaseException as exc:
                 if not propagate_exceptions:
                     exceptions.append(exc)
@@ -374,9 +449,7 @@ class AsyncDagTaskProcessor(Generic[T]):
 
         async with asyncio.TaskGroup() as tg:
             tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
-            for idx in sorted(wave_lookup):
-                if targets[idx] == 0:
-                    await schedule_wave(idx)
+            await schedule_wave(root_wave_id)
 
         return exceptions
 

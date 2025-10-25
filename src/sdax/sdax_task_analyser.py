@@ -80,6 +80,8 @@ class TaskAnalysis(Generic[T]):
     dependencies: Dict[str, Tuple[str, ...]]
     pre_execute_graph: ExecutionGraph
     post_execute_graph: ExecutionGraph
+    pre_root_wave_id: int | None
+    post_root_wave_id: int | None
 
     # Optional runtime convenience metadata (derived, provided at init by analyzer)
     wave_index_by_task: Dict[str, int]
@@ -229,6 +231,8 @@ class TaskAnalyzer(Generic[T]):
             dependencies=dict(self.dependencies),
             pre_execute_graph=pre_exec_graph,
             post_execute_graph=post_exec_graph,
+            pre_root_wave_id=getattr(self, "_pre_root_wave_id", None),
+            post_root_wave_id=getattr(self, "_post_root_wave_id", None),
             wave_index_by_task=dict(self._pre_wave_index_by_task),
             task_to_consumer_waves=dict(self._pre_task_to_consumer_waves),
             wave_dep_count=self._pre_wave_dep_count,
@@ -409,6 +413,13 @@ class TaskAnalyzer(Generic[T]):
 
         pre_graph = ExecutionGraph(waves=tuple(waves))
 
+        root_waves = [w.wave_num for w in pre_graph.waves if not w.depends_on_tasks]
+        if len(root_waves) > 1:
+            raise ValueError(
+                "TaskAnalyzer detected multiple root pre-execute waves; exotic graphs are not supported."
+            )
+        self._pre_root_wave_id = root_waves[0] if root_waves else None
+
         # Build runtime convenience metadata
         wave_index_by_task: Dict[str, int] = {}
         for w in pre_graph.waves:
@@ -544,6 +555,13 @@ class TaskAnalyzer(Generic[T]):
             waves.append(wave)
 
         post_graph = ExecutionGraph(waves=tuple(waves))
+
+        post_root_waves = [w.wave_num for w in post_graph.waves if not w.depends_on_tasks]
+        if len(post_root_waves) > 1:
+            raise ValueError(
+                "TaskAnalyzer detected multiple root post-execute waves; exotic graphs are not supported."
+            )
+        self._post_root_wave_id = post_root_waves[0] if post_root_waves else None
 
         # Build post convenience metadata (reverse)
         post_wave_index_by_task: Dict[str, int] = {}
