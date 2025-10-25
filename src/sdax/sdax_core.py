@@ -29,6 +29,16 @@ class _ExecutionContext(Generic[T]):
     user_context: T
 
 
+@dataclass(frozen=True)
+class _TaskGroupWrapper(SdaxTaskGroup):
+    """Wrapper for asyncio.TaskGroup to provide a SdaxTaskGroup interface."""
+    task_group: asyncio.TaskGroup
+
+    def create_task(
+        self, coro: Awaitable[Any], *, name: str | None = None, context: Any | None = None):
+        return self.task_group.create_task(coro, name=name, context=context)
+
+
 class PhaseId(Enum):
     PRE_EXEC = auto()
     EXECUTE = auto()
@@ -38,12 +48,11 @@ class PhaseId(Enum):
 @dataclass(slots=True)
 class Phase(Generic[T]):
     phase_id: PhaseId
-    run: Callable[["PhaseContext[T]"], Awaitable["Phase[T] | None"]]
+    run: Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]
 
 
 @dataclass(slots=True)
 class PhaseContext(Generic[T]):
-    processor: "AsyncDagTaskProcessor[T]"
     exec_ctx: _ExecutionContext[T]
     analysis: TaskAnalysis[T]
     tasks: Dict[str, AsyncTask[T]]
@@ -53,6 +62,290 @@ class PhaseContext(Generic[T]):
     exec_exception: BaseException | None = None
     post_exceptions: list[BaseException] = field(default_factory=list)
     synthetic_pre_started: set[str] = field(default_factory=set)
+
+    def create_phase(self, phase_id: PhaseId) -> Phase[T]:
+        runner = self._phase_runner_map().get(phase_id)
+        if runner is None:
+            raise ValueError(f"Unsupported phase id {phase_id}")
+        return Phase(phase_id=phase_id, run=runner)
+
+    def _phase_runner_map(self) -> Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]:
+        return {
+            PhaseId.PRE_EXEC: PhaseContext._run_pre_phase,
+            PhaseId.EXECUTE: PhaseContext._run_execute_phase,
+            PhaseId.POST_EXEC: PhaseContext._run_post_phase,
+        }
+
+    async def _run_pre_phase(self) -> PhaseId | None:
+        pre_waves = self.analysis.pre_execute_graph.waves
+        if pre_waves:
+            try:
+                await self._run_wave_phase(
+                    root_wave_id=self.analysis.pre_root_wave_id,
+                    waves=pre_waves,
+                    wave_dep_count=self.analysis.wave_dep_count,
+                    task_to_consumer_waves=self.analysis.task_to_consumer_waves,
+                    should_run=self._pre_should_run,
+                    run_task=self._run_pre_task,
+                    propagate_exceptions=True,
+                    complete_on_error=False,
+                )
+            except* Exception as eg:
+                self.pre_exception = eg
+        return self._phase_after_pre()
+
+    def _phase_after_pre(self) -> PhaseId:
+        if self.pre_exception is not None:
+            return PhaseId.POST_EXEC
+        if self.analysis.execute_task_names:
+            return PhaseId.EXECUTE
+        return PhaseId.POST_EXEC
+
+    async def _run_execute_phase(self) -> PhaseId | None:
+        exec_names = self.analysis.execute_task_names
+        exec_to_run: list[str] = []
+        for name in exec_names:
+            task = self.tasks.get(name)
+            if not task or task.execute is None:
+                continue
+            if task.pre_execute is not None and name not in self.pre_succeeded:
+                continue
+            exec_to_run.append(name)
+
+        if exec_to_run:
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    tg_wrapper = _TaskGroupWrapper(task_group=tg)
+                    for name in exec_to_run:
+                        tg.create_task(
+                            self._execute_with_retry(
+                                self.tasks[name].execute, self.exec_ctx, tg_wrapper
+                            )
+                        )
+            except* Exception as eg:
+                self.exec_exception = eg
+        return PhaseId.POST_EXEC
+
+    async def _run_post_phase(self) -> PhaseId | None:
+        post_waves = self.analysis.post_execute_graph.waves
+        if post_waves:
+            self.synthetic_pre_started = self._compute_synthetic_pre_started(self.pre_succeeded)
+            self.post_exceptions.extend(
+                await self._run_wave_phase(
+                    root_wave_id=self.analysis.post_root_wave_id,
+                    waves=post_waves,
+                    wave_dep_count=self.analysis.post_wave_dep_count,
+                    task_to_consumer_waves=self.analysis.post_task_to_consumer_waves,
+                    should_run=self._post_should_run,
+                    run_task=self._run_post_task,
+                    propagate_exceptions=False,
+                    complete_on_error=True,
+                )
+            )
+        return None
+
+    def raise_failures(self) -> None:
+        exceptions: list[BaseException] = []
+        if self.pre_exception:
+            exceptions.append(self.pre_exception)
+        if self.exec_exception:
+            exceptions.append(self.exec_exception)
+        exceptions.extend(self.post_exceptions)
+        if not exceptions:
+            return
+        if len(exceptions) == 1:
+            raise exceptions[0]
+        raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
+
+    def _pre_should_run(self, name: str) -> bool:
+        task = self.tasks[name]
+        return task.pre_execute is not None
+
+    async def _run_pre_task(self, task_name: str, tg_wrapper: _TaskGroupWrapper):
+        task = self.tasks[task_name]
+        self.pre_started.add(task_name)
+        await self._execute_with_retry(task.pre_execute, self.exec_ctx, tg_wrapper)
+        self.pre_succeeded.add(task_name)
+
+    def _post_should_run(self, name: str) -> bool:
+        task = self.tasks[name]
+        if task.post_execute is None:
+            return False
+        if task.pre_execute is None:
+            return name in self.synthetic_pre_started
+        return name in self.pre_started
+
+    async def _run_post_task(self, name: str, _tg_wrapper: _TaskGroupWrapper):
+        task = self.tasks[name]
+        result = await self._run_post_isolated(task, self.exec_ctx)
+        if isinstance(result, BaseException):
+            raise result
+
+    async def _run_post_isolated(
+        self, task: AsyncTask[T], exec_ctx: _ExecutionContext[T]
+    ) -> BaseException | None:
+        if not task.post_execute:
+            return None
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg_wrapper = _TaskGroupWrapper(task_group=tg)
+                tg.create_task(self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
+        except ExceptionGroup as eg:
+            return eg
+        return None
+
+    async def _run_wave_phase(
+        self,
+        *,
+        root_wave_id: int | None,
+        waves: Sequence[ExecutionWave],
+        wave_dep_count: Sequence[int],
+        task_to_consumer_waves: Mapping[str, Sequence[int]],
+        should_run: Callable[[str], bool],
+        run_task: Callable[[str, _TaskGroupWrapper], Awaitable[None]],
+        propagate_exceptions: bool,
+        complete_on_error: bool,
+    ) -> list[BaseException]:
+        if not waves:
+            return []
+        if root_wave_id is None:
+            raise ValueError("Wave execution requires a root wave id from the analyzer.")
+
+        wave_lookup: Dict[int, ExecutionWave] = {wave.wave_num: wave for wave in waves}
+        if root_wave_id not in wave_lookup:
+            raise ValueError(f"Root wave id {root_wave_id} not found in wave definitions.")
+        max_wave_index = max(wave_lookup) + 1 if wave_lookup else 0
+
+        targets = list(wave_dep_count)
+        if len(targets) < max_wave_index:
+            targets.extend([0] * (max_wave_index - len(targets)))
+        completed = [0] * len(targets)
+
+        scheduled: set[int] = set()
+        exceptions: list[BaseException] = []
+        tg_ref: Dict[str, _TaskGroupWrapper] = {}
+
+        async def schedule_wave(idx: int):
+            if idx in scheduled:
+                return
+            scheduled.add(idx)
+            wave = wave_lookup.get(idx)
+            if wave is None:
+                return
+
+            has_runnable = False
+            for task_name in wave.tasks:
+                if not should_run(task_name):
+                    await on_task_complete(task_name)
+                    continue
+                has_runnable = True
+                tg_ref["tg"].create_task(run_wrapper(task_name))
+            if not has_runnable:
+                return
+
+        async def on_task_complete(task_name: str):
+            for consumer_idx in task_to_consumer_waves.get(task_name, ()):
+                if consumer_idx >= len(completed):
+                    continue
+                completed[consumer_idx] += 1
+                if completed[consumer_idx] >= targets[consumer_idx]:
+                    await schedule_wave(consumer_idx)
+
+        async def run_wrapper(task_name: str):
+            try:
+                await run_task(task_name, tg_ref["tg"])
+            except BaseException as exc:
+                if not propagate_exceptions:
+                    exceptions.append(exc)
+                    if complete_on_error:
+                        await on_task_complete(task_name)
+                    return
+                if complete_on_error:
+                    await on_task_complete(task_name)
+                raise
+            else:
+                await on_task_complete(task_name)
+
+        async with asyncio.TaskGroup() as tg:
+            tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
+            await schedule_wave(root_wave_id)
+
+        return exceptions
+
+    async def _execute_with_retry(
+        self,
+        task_func_obj: TaskFunction[T],
+        exec_ctx: _ExecutionContext[T],
+        tg_wrapper: _TaskGroupWrapper,
+    ):
+        if not task_func_obj:
+            return
+        retries = task_func_obj.retries
+        timeout = task_func_obj.timeout
+        initial_delay = task_func_obj.initial_delay
+        backoff_factor = task_func_obj.backoff_factor
+        retryable_exceptions = task_func_obj.retryable_exceptions
+        ctx = exec_ctx.user_context
+
+        if not retryable_exceptions:
+            if timeout is None:
+                await task_func_obj.call(ctx, tg_wrapper)
+            else:
+                await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
+            return
+        for attempt in range(retries + 1):
+            try:
+                if timeout is None:
+                    await task_func_obj.call(ctx, tg_wrapper)
+                else:
+                    await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
+                return
+            except retryable_exceptions as _:
+                if attempt >= retries:
+                    raise
+                delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
+                await asyncio.sleep(delay)
+
+    def _compute_synthetic_pre_started(self, pre_succeeded: set[str]) -> set[str]:
+        analysis = self.analysis
+        tasks = analysis.tasks
+        dependencies = analysis.dependencies
+
+        ready: set[str] = set(pre_succeeded)
+        topo_order = analysis.topological_order or tuple(self._topological_order())
+
+        for name in topo_order:
+            task = tasks[name]
+            deps = dependencies.get(name, ())
+            if task.pre_execute is not None:
+                if name in pre_succeeded:
+                    ready.add(name)
+                continue
+            if all(dep in ready for dep in deps):
+                ready.add(name)
+        return ready
+
+    def _topological_order(self) -> List[str]:
+        dependencies = self.analysis.dependencies
+        tasks = self.analysis.tasks
+
+        in_degree = {name: len(dependencies.get(name, ())) for name in tasks}
+        dependents: Dict[str, List[str]] = defaultdict(list)
+        for task_name, deps in dependencies.items():
+            for dep in deps:
+                dependents[dep].append(task_name)
+
+        queue: deque[str] = deque(sorted(name for name, deg in in_degree.items() if deg == 0))
+        order: List[str] = []
+
+        while queue:
+            current = queue.popleft()
+            order.append(current)
+            for dependent in dependents.get(current, ()):
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+        return order
 
 
 class AsyncTaskProcessorBuilder(Generic[T], ABC):
@@ -108,16 +401,6 @@ class AsyncDagTaskProcessorBuilder(Generic[T]):
 
 
 @dataclass(frozen=True)
-class _TaskGroupWrapper(SdaxTaskGroup):
-    """Wrapper for asyncio.TaskGroup to provide a SdaxTaskGroup interface."""
-    task_group: asyncio.TaskGroup
-
-    def create_task(
-        self, coro: Awaitable[Any], *, name: str | None = None, context: Any | None = None):
-        return self.task_group.create_task(coro, name=name, context=context)
-
-
-@dataclass(frozen=True)
 class AsyncDagTaskProcessor(Generic[T]):
     """Immutable DAG executor that consumes TaskAnalysis graphs.
 
@@ -134,324 +417,21 @@ class AsyncDagTaskProcessor(Generic[T]):
         return AsyncDagTaskProcessorBuilder[T]()
 
     async def process_tasks(self, ctx: T):
-        phase_ctx = PhaseContext(
-            processor=self,
+        phase, phase_ctx = self.initial_phase(ctx)
+        while phase is not None:
+            next_phase_id = await phase.run(phase_ctx)
+            phase = phase_ctx.create_phase(next_phase_id) if next_phase_id is not None else None
+
+        phase_ctx.raise_failures()
+
+    def initial_phase(self, ctx: T) -> Tuple[Phase[T], PhaseContext[T]]:
+        phase_ctx = PhaseContext[T](
             exec_ctx=_ExecutionContext(user_context=ctx),
             analysis=self.analysis,
             tasks=dict(self.analysis.tasks),
         )
 
-        phase = self._make_phase(PhaseId.PRE_EXEC)
-        while phase is not None:
-            phase = await phase.run(phase_ctx)
-
-        self._raise_if_failures(phase_ctx)
-
-    def _make_phase(self, phase_id: PhaseId | None) -> Phase[T] | None:
-        if phase_id is None:
-            return None
-        runner_map: dict[PhaseId, Callable[[PhaseContext[T]], Awaitable[Phase[T] | None]]] = {
-            PhaseId.PRE_EXEC: self._run_pre_phase,
-            PhaseId.EXECUTE: self._run_execute_phase,
-            PhaseId.POST_EXEC: self._run_post_phase,
-        }
-        runner = runner_map.get(phase_id)
-        if runner is None:
-            return None
-        return Phase(phase_id=phase_id, run=runner)
-
-    async def _run_pre_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
-        analysis = phase_ctx.analysis
-        pre_waves = analysis.pre_execute_graph.waves
-        if pre_waves:
-            try:
-                await self._run_wave_phase(
-                    phase_ctx=phase_ctx,
-                    root_wave_id=analysis.pre_root_wave_id,
-                    waves=pre_waves,
-                    wave_dep_count=analysis.wave_dep_count,
-                    task_to_consumer_waves=analysis.task_to_consumer_waves,
-                    should_run=self._pre_should_run,
-                    run_task=self._run_pre_task,
-                    propagate_exceptions=True,
-                    complete_on_error=False,
-                )
-            except* Exception as eg:
-                phase_ctx.pre_exception = eg
-        return self._make_phase(self._phase_after_pre(phase_ctx))
-
-    def _phase_after_pre(self, phase_ctx: PhaseContext[T]) -> PhaseId:
-        if phase_ctx.pre_exception is not None:
-            return PhaseId.POST_EXEC
-        if phase_ctx.analysis.execute_task_names:
-            return PhaseId.EXECUTE
-        return PhaseId.POST_EXEC
-
-    async def _run_execute_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
-        analysis = phase_ctx.analysis
-        tasks_by_name = phase_ctx.tasks
-        exec_names = analysis.execute_task_names
-        exec_to_run: list[str] = []
-        for name in exec_names:
-            task = tasks_by_name.get(name)
-            if not task or task.execute is None:
-                continue
-            if task.pre_execute is not None and name not in phase_ctx.pre_succeeded:
-                continue
-            exec_to_run.append(name)
-
-        if exec_to_run:
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    tg_wrapper = _TaskGroupWrapper(task_group=tg)
-                    for name in exec_to_run:
-                        tg.create_task(
-                            self._execute_with_retry(
-                                tasks_by_name[name].execute, phase_ctx.exec_ctx, tg_wrapper
-                            )
-                        )
-            except* Exception as eg:
-                phase_ctx.exec_exception = eg
-
-        return self._make_phase(PhaseId.POST_EXEC)
-
-    async def _run_post_phase(self, phase_ctx: PhaseContext[T]) -> Phase[T] | None:
-        analysis = phase_ctx.analysis
-        post_waves = analysis.post_execute_graph.waves
-        if post_waves:
-            phase_ctx.synthetic_pre_started = self._compute_synthetic_pre_started(
-                phase_ctx.pre_succeeded
-            )
-            phase_ctx.post_exceptions.extend(
-                await self._run_wave_phase(
-                    phase_ctx=phase_ctx,
-                    root_wave_id=analysis.post_root_wave_id,
-                    waves=post_waves,
-                    wave_dep_count=analysis.post_wave_dep_count,
-                    task_to_consumer_waves=analysis.post_task_to_consumer_waves,
-                    should_run=self._post_should_run,
-                    run_task=self._run_post_task,
-                    propagate_exceptions=False,
-                    complete_on_error=True,
-                )
-            )
-        return None
-
-    def _pre_should_run(self, phase_ctx: PhaseContext[T], name: str) -> bool:
-        task = phase_ctx.tasks[name]
-        return task.pre_execute is not None
-
-    async def _run_pre_task(
-        self, phase_ctx: PhaseContext[T], task_name: str, tg_wrapper: _TaskGroupWrapper
-    ):
-        task = phase_ctx.tasks[task_name]
-        phase_ctx.pre_started.add(task_name)
-        await self._execute_with_retry(task.pre_execute, phase_ctx.exec_ctx, tg_wrapper)
-        phase_ctx.pre_succeeded.add(task_name)
-
-    def _post_should_run(self, phase_ctx: PhaseContext[T], name: str) -> bool:
-        task = phase_ctx.tasks[name]
-        if task.post_execute is None:
-            return False
-        if task.pre_execute is None:
-            return name in phase_ctx.synthetic_pre_started
-        return name in phase_ctx.pre_started
-
-    async def _run_post_task(
-        self, phase_ctx: PhaseContext[T], name: str, _tg_wrapper: _TaskGroupWrapper
-    ):
-        task = phase_ctx.tasks[name]
-        result = await self._run_post_isolated(task, phase_ctx.exec_ctx)
-        if isinstance(result, BaseException):
-            raise result
-
-    async def _run_post_isolated(
-        self, task: AsyncTask[T], exec_ctx: _ExecutionContext[T]
-    ) -> BaseException | None:
-        if not task.post_execute:
-            return None
-        try:
-            async with asyncio.TaskGroup() as tg:
-                tg_wrapper = _TaskGroupWrapper(task_group=tg)
-                tg.create_task(self._execute_with_retry(task.post_execute, exec_ctx, tg_wrapper))
-        except ExceptionGroup as eg:
-            return eg
-        return None
-
-    def _raise_if_failures(self, phase_ctx: PhaseContext[T]) -> None:
-        exceptions: list[BaseException] = []
-        if phase_ctx.pre_exception:
-            exceptions.append(phase_ctx.pre_exception)
-        if phase_ctx.exec_exception:
-            exceptions.append(phase_ctx.exec_exception)
-        exceptions.extend(phase_ctx.post_exceptions)
-        if not exceptions:
-            return
-        if len(exceptions) == 1:
-            raise exceptions[0]
-        raise ExceptionGroup("Multiple failures during DAG execution", exceptions)
-
-    async def _execute_with_retry(
-        self,
-        task_func_obj: TaskFunction[T],
-        exec_ctx: _ExecutionContext[T],
-        tg_wrapper: _TaskGroupWrapper):
-        if not task_func_obj:
-            return
-        retries = task_func_obj.retries
-        timeout = task_func_obj.timeout
-        initial_delay = task_func_obj.initial_delay
-        backoff_factor = task_func_obj.backoff_factor
-        retryable_exceptions = task_func_obj.retryable_exceptions
-        ctx = exec_ctx.user_context
-
-        # If retryable_exceptions is empty, no retries should occur
-        if not retryable_exceptions or retries <= 0:
-            if timeout is None:
-                await task_func_obj.call(ctx, tg_wrapper)
-            else:
-                await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
-            return
-        for attempt in range(retries + 1):
-            try:
-                if timeout is None:
-                    await task_func_obj.call(ctx, tg_wrapper)
-                else:
-                    await asyncio.wait_for(task_func_obj.call(ctx, tg_wrapper), timeout=timeout)
-                return
-            except retryable_exceptions as _:
-                if attempt >= retries:
-                    raise
-                delay = initial_delay * (backoff_factor**attempt) * random.uniform(0.5, 1.0)
-                await asyncio.sleep(delay)
-
-    def _compute_synthetic_pre_started(self, pre_succeeded: set[str]) -> set[str]:
-        """Compute tasks that can be treated as having completed pre-execute.
-
-        Tasks with real pre-execute must have succeeded. Tasks without pre-execute
-        are considered started only if all their dependencies have already been
-        deemed started (recursively).
-        """
-        analysis = self.analysis
-        tasks = analysis.tasks
-        dependencies = analysis.dependencies
-
-        ready: set[str] = set(pre_succeeded)
-        topo_order = analysis.topological_order or tuple(self._topological_order())
-
-        for name in topo_order:
-            task = tasks[name]
-            deps = dependencies.get(name, ())
-            if task.pre_execute is not None:
-                if name in pre_succeeded:
-                    ready.add(name)
-                continue
-            if all(dep in ready for dep in deps):
-                ready.add(name)
-        return ready
-
-    def _topological_order(self) -> List[str]:
-        dependencies = self.analysis.dependencies
-        tasks = self.analysis.tasks
-
-        in_degree = {name: len(dependencies.get(name, ())) for name in tasks}
-        dependents: Dict[str, List[str]] = defaultdict(list)
-        for task_name, deps in dependencies.items():
-            for dep in deps:
-                dependents[dep].append(task_name)
-
-        queue: deque[str] = deque(sorted(name for name, deg in in_degree.items() if deg == 0))
-        order: List[str] = []
-
-        while queue:
-            current = queue.popleft()
-            order.append(current)
-            for dependent in dependents.get(current, ()):
-                in_degree[dependent] -= 1
-                if in_degree[dependent] == 0:
-                    queue.append(dependent)
-        return order
-
-    async def _run_wave_phase(
-        self,
-        phase_ctx: PhaseContext[T],
-        *,
-        root_wave_id: int | None,
-        waves: Sequence[ExecutionWave],
-        wave_dep_count: Sequence[int],
-        task_to_consumer_waves: Mapping[str, Sequence[int]],
-        should_run: Callable[[PhaseContext[T], str], bool],
-        run_task: Callable[[PhaseContext[T], str, _TaskGroupWrapper], Awaitable[None]],
-        propagate_exceptions: bool,
-        complete_on_error: bool,
-    ) -> list[BaseException]:
-        """Generic wave executor used for both pre and post phases."""
-        if not waves:
-            return []
-        if root_wave_id is None:
-            raise ValueError("Wave execution requires a root wave id from the analyzer.")
-
-        wave_lookup: Dict[int, ExecutionWave] = {wave.wave_num: wave for wave in waves}
-        if root_wave_id not in wave_lookup:
-            raise ValueError(f"Root wave id {root_wave_id} not found in wave definitions.")
-        max_wave_index = max(wave_lookup) + 1 if wave_lookup else 0
-
-        targets = list(wave_dep_count)
-        if len(targets) < max_wave_index:
-            targets.extend([0] * (max_wave_index - len(targets)))
-        completed = [0] * len(targets)
-
-        scheduled: set[int] = set()
-        exceptions: list[BaseException] = []
-        tg_ref: Dict[str, _TaskGroupWrapper] = {}
-
-        async def schedule_wave(idx: int):
-            if idx in scheduled:
-                return
-            scheduled.add(idx)
-            wave = wave_lookup.get(idx)
-            if wave is None:
-                return
-
-            has_runnable = False
-            for task_name in wave.tasks:
-                if not should_run(phase_ctx, task_name):
-                    await on_task_complete(task_name)
-                    continue
-                has_runnable = True
-                tg_ref["tg"].create_task(run_wrapper(task_name))
-            if not has_runnable:
-                # Wave contributes to dependents even if no runnable tasks
-                return
-
-        async def on_task_complete(task_name: str):
-            for consumer_idx in task_to_consumer_waves.get(task_name, ()):
-                if consumer_idx >= len(completed):
-                    continue
-                completed[consumer_idx] += 1
-                if completed[consumer_idx] >= targets[consumer_idx]:
-                    await schedule_wave(consumer_idx)
-
-        async def run_wrapper(task_name: str):
-            try:
-                await run_task(phase_ctx, task_name, tg_ref["tg"])
-            except BaseException as exc:
-                if not propagate_exceptions:
-                    exceptions.append(exc)
-                    if complete_on_error:
-                        await on_task_complete(task_name)
-                    return
-                if complete_on_error:
-                    await on_task_complete(task_name)
-                raise
-            else:
-                await on_task_complete(task_name)
-
-        async with asyncio.TaskGroup() as tg:
-            tg_ref["tg"] = _TaskGroupWrapper(task_group=tg)
-            await schedule_wave(root_wave_id)
-
-        return exceptions
+        return phase_ctx.create_phase(PhaseId.PRE_EXEC), phase_ctx
 
 
 @dataclass
