@@ -256,7 +256,7 @@ Failure semantics:
 - **If any `pre_execute` fails**: all remaining scheduled `pre_execute` tasks are cancelled; no further pre waves are started; the `execute` phase is skipped; `post_execute` still runs for tasks whose pre was started (plus post-only tasks whose dependency chain completed successfully) in reverse dependency order; exceptions are aggregated.
 - **If any `execute` fails**: other execute tasks continue; `post_execute` runs; exceptions are aggregated.
 - **If any `post_execute` fails**: siblings are not cancelled; all eligible cleanup still runs; exceptions are aggregated.
-- The final error is an `ExceptionGroup` that may include failures from pre, execute, and post.
+- The final error is an `SdaxExecutionError` (an `ExceptionGroup` subclass) that may include failures from pre, execute, and post.
 
 ### The "Elevator" Pattern (level adapter)
 
@@ -360,24 +360,31 @@ Notes:
 Tasks can fail at any phase. The framework:
 1. **Cancels** remaining tasks at the same level
 2. **Runs cleanup** for all tasks that started `pre_execute`
-3. **Collects** all exceptions into an `ExceptionGroup`
+3. **Collects** all exceptions into an `SdaxExecutionError`
 4. **Raises** the group after cleanup completes
 
 ```python
+from sdax import SdaxExecutionError, flatten_exceptions
+
 try:
     await processor.process_tasks(ctx)
-except* ValueError as eg:
-    # Handle specific exception type
-    for exc in eg.exceptions:
-        print(f"Validation error: {exc}")
-except* TimeoutError as eg:
-    # Handle timeouts
-    for exc in eg.exceptions:
-        print(f"Task timed out: {exc}")
-except ExceptionGroup as eg:
-    # Handle all errors
-    print(f"Multiple failures: {eg}")
+except SdaxExecutionError as exc:
+    # Inspect individual failures (pre, execute, or post)
+    for leaf in exc.leaf_exceptions():
+        if isinstance(leaf, ValueError):
+            handle_validation_error(leaf)
+        elif isinstance(leaf, asyncio.TimeoutError):
+            handle_timeout(leaf)
+        else:
+            log_exception(leaf)
+
+    # Or use the helper to work with aggregated errors
+    failures = flatten_exceptions(exc)
+    if any(isinstance(f, CriticalError) for f in failures):
+        raise  # escalate
 ```
+
+`SdaxExecutionError` still subclasses `ExceptionGroup`, so `except* SomeError` clauses remain valid when you prefer PEP 654-style handling. The helper utilities above provide a concise way to drill into nested failures without rewriting flattening logic in every consumer.
 
 ## Advanced Features
 
@@ -432,6 +439,41 @@ AsyncTask(
     )
 )
 ```
+
+### Phase-by-Phase Execution
+
+For advanced scenarios you may want to observe or interleave work between the `pre_execute`, `execute`, and `post_execute`
+phases. The task processor exposes an async context manager that yields an `AsyncPhaseRunner`:
+
+```python
+from sdax import AsyncTaskProcessor, SdaxExecutionError, flatten_exceptions
+from sdax.sdax_core import PhaseId  # Phase identifiers: PRE_EXEC, EXECUTE, POST_EXEC
+
+processor = AsyncTaskProcessor.builder() ... .build()
+
+async with processor.open(ctx) as runner:
+    while await runner.run_next():
+        match runner.last_phase_id():
+            case PhaseId.PRE_EXEC:
+                audit_pre_phase(ctx)
+            case PhaseId.EXECUTE:
+                emit_metrics(ctx)
+            case PhaseId.POST_EXEC:
+                pass  # cleanup phase complete
+
+    if runner.has_failures():
+        try:
+            runner.raise_failures()
+        except SdaxExecutionError as exc:
+            for failure in flatten_exceptions(exc):
+                log_failure(failure)  # application-specific handling
+```
+
+When the context exits, the runner resumes only the phases that are required for consistency: if no phase has started it
+is a no-op, if only `pre_execute` has run it skips `execute` but still performs `post_execute` cleanup, otherwise it
+continues through the remaining phases. You can inspect `next_phase_id()`, `last_phase_id()`, `has_failures()`, or call
+`failures()` / `raise_failures()` to integrate SDAX orchestration with frameworks that need explicit checkpoints (UI
+progress reporting, long-running batch systems, etc.).
 
 ### Retryable Exceptions
 

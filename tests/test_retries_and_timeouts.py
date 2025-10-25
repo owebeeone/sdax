@@ -4,20 +4,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict
 
-from sdax import AsyncTask, AsyncTaskProcessor, SdaxExecutionError, TaskFunction
-
-
-def _flatten_exceptions(exc: BaseException) -> list[BaseException]:
-    """Return leaf exceptions from nested ExceptionGroups."""
-    leaves: list[BaseException] = []
-    stack = [exc]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, ExceptionGroup):
-            stack.extend(current.exceptions)
-        else:
-            leaves.append(current)
-    return leaves
+from sdax import (
+    AsyncTask,
+    AsyncTaskProcessor,
+    SdaxExecutionError,
+    TaskFunction,
+    flatten_exceptions,
+)
 
 
 @dataclass
@@ -118,7 +111,7 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
             await processor.process_tasks(ctx)
 
         # Check that the underlying exception is indeed a TimeoutError
-        leaves = _flatten_exceptions(cm.exception)
+        leaves = flatten_exceptions(cm.exception)
         self.assertEqual(len(leaves), 1)
         self.assertIsInstance(leaves[0], asyncio.TimeoutError)
 
@@ -180,7 +173,7 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
             self.fail("Expected an exception to be raised")
         except SdaxExecutionError as eg:
             # Check that the underlying exception is ValueError
-            leaves = _flatten_exceptions(eg)
+            leaves = flatten_exceptions(eg)
             self.assertEqual(len(leaves), 1)
             self.assertIsInstance(leaves[0], ValueError)
             self.assertEqual(str(leaves[0]), "This always fails")
@@ -260,7 +253,7 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
             self.fail("Expected an exception to be raised")
         except SdaxExecutionError as eg:
             # Check that the underlying exception is CustomNonRetryableError
-            leaves = _flatten_exceptions(eg)
+            leaves = flatten_exceptions(eg)
             self.assertEqual(len(leaves), 1)
             self.assertIsInstance(leaves[0], CustomNonRetryableError)
             self.assertEqual(str(leaves[0]), "Non-retryable error")
@@ -340,7 +333,7 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SdaxExecutionError) as cm:
             await processor.process_tasks(ctx)
 
-        leaves = _flatten_exceptions(cm.exception)
+        leaves = flatten_exceptions(cm.exception)
         self.assertTrue(any(isinstance(exc, CustomNonRetryableError) for exc in leaves))
         self.assertEqual(ATTEMPTS["fails_with_mixed_group"], 1)
 

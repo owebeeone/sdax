@@ -21,14 +21,29 @@ T = TypeVar("T")
 class SdaxExecutionError(ExceptionGroup):
     """Raised when one or more SDAX task phases fail."""
 
+    def leaf_exceptions(self) -> List[BaseException]:
+        """Return the underlying leaf exceptions for this execution error."""
+        return flatten_exceptions(self)
+
+
+def flatten_exceptions(exc: BaseException) -> List[BaseException]:
+    """Flatten nested ExceptionGroups into a list of leaf exceptions."""
+    leaves: List[BaseException] = []
+    stack: List[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ExceptionGroup):
+            stack.extend(current.exceptions)
+        else:
+            leaves.append(current)
+    return leaves
+
 
 def _is_retryable_exception(exc: BaseException, retryable: tuple[type[BaseException], ...]) -> bool:
     """Return True if the exception (or its aggregated children) are retryable."""
     if not retryable:
         return False
-    if isinstance(exc, ExceptionGroup):
-        return all(_is_retryable_exception(child, retryable) for child in exc.exceptions)
-    return isinstance(exc, retryable)
+    return all(isinstance(leaf, retryable) for leaf in flatten_exceptions(exc))
 
 
 @dataclass
@@ -453,6 +468,7 @@ class AsyncPhaseRunner(Generic[T]):
     _current_phase: Phase[T] | None = field(init=False, default=None)
     _next_phase_id: PhaseId | None = field(init=False, default=None)
     _last_phase_id: PhaseId | None = field(init=False, default=None)
+    _phase_started: bool = field(init=False, default=False)
     _closed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -498,6 +514,7 @@ class AsyncPhaseRunner(Generic[T]):
             return False
 
         current = self._current_phase
+        self._phase_started = True
         self._last_phase_id = current.phase_id
         next_phase_id = await current.run(self._phase_ctx)
         self._current_phase = (
@@ -512,7 +529,17 @@ class AsyncPhaseRunner(Generic[T]):
         """Ensure all remaining phases are executed."""
         if self._closed:
             return
+        if not self._phase_started:
+            self._closed = True
+            return
         while self._current_phase is not None:
+            if (
+                self._current_phase.phase_id == PhaseId.EXECUTE
+                and self._last_phase_id == PhaseId.PRE_EXEC
+            ):
+                self._current_phase = self._phase_ctx.create_phase(PhaseId.POST_EXEC)
+                self._next_phase_id = self._current_phase.phase_id
+                continue
             if not await self.run_next():
                 break
         self._closed = True

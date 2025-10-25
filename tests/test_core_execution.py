@@ -6,8 +6,14 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from sdax import AsyncTask, AsyncTaskProcessor, TaskFunction
-from sdax.sdax_core import AsyncDagTaskProcessor
+from sdax import (
+    AsyncTask,
+    AsyncTaskProcessor,
+    SdaxExecutionError,
+    TaskFunction,
+    flatten_exceptions,
+)
+from sdax.sdax_core import AsyncDagTaskProcessor, PhaseId
 
 
 @dataclass
@@ -449,6 +455,106 @@ class TestSdaxCoreExecution(unittest.IsolatedAsyncioTestCase):
             CALL_LOG.index("B-post"),
             "Downstream post-only cleanup must occur before its dependency",
         )
+
+    async def test_phase_runner_loop_matches_readme_example(self):
+        """Ensure README-style phase runner loop continues to work."""
+        ctx = TaskContext()
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    "Runner",
+                    pre_execute=TaskFunction(bind_async(log_pre, "Runner")),
+                    execute=TaskFunction(bind_async(fail_exec, "Runner")),
+                    post_execute=TaskFunction(bind_async(log_post, "Runner")),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        observed_phases: list[PhaseId] = []
+        handled_failures: list[BaseException] = []
+        final_phase: PhaseId | None = None
+
+        with self.assertRaises(SdaxExecutionError):
+            async with processor.open(ctx) as runner:
+                while await runner.run_next():
+                    phase = runner.last_phase_id()
+                    observed_phases.append(phase)
+                    match phase:
+                        case PhaseId.PRE_EXEC:
+                            CALL_LOG.append("loop-pre")
+                        case PhaseId.EXECUTE:
+                            CALL_LOG.append("loop-exec")
+                        case PhaseId.POST_EXEC:
+                            pass
+
+                final_phase = runner.last_phase_id()
+
+                if runner.has_failures():
+                    try:
+                        runner.raise_failures()
+                    except SdaxExecutionError as exc:
+                        handled_failures.extend(flatten_exceptions(exc))
+
+        self.assertIn(PhaseId.PRE_EXEC, observed_phases)
+        self.assertIn(PhaseId.EXECUTE, observed_phases)
+        self.assertEqual(final_phase, PhaseId.POST_EXEC)
+        self.assertIn("Runner-pre", CALL_LOG)
+        self.assertIn("Runner-exec-fail", CALL_LOG)
+        self.assertIn("Runner-post", CALL_LOG)
+        self.assertIn("loop-pre", CALL_LOG)
+        self.assertIn("loop-exec", CALL_LOG)
+        self.assertEqual(len(handled_failures), 1)
+        self.assertIsInstance(handled_failures[0], ValueError)
+
+    async def test_phase_runner_exit_without_running_phases(self):
+        """Leaving the phase runner early should not execute any phase."""
+        ctx = TaskContext()
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    "Runner",
+                    pre_execute=TaskFunction(bind_async(log_pre, "Runner")),
+                    execute=TaskFunction(bind_async(log_exec, "Runner")),
+                    post_execute=TaskFunction(bind_async(log_post, "Runner")),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        async with processor.open(ctx):
+            # No explicit run_next invocation; closing should be a no-op.
+            pass
+
+        self.assertEqual(CALL_LOG, [])
+
+    async def test_phase_runner_cleanup_after_pre_only(self):
+        """If only pre_execute ran, closing the runner should trigger cleanup but skip execute."""
+        ctx = TaskContext()
+        processor = (
+            AsyncTaskProcessor.builder()
+            .add_task(
+                AsyncTask(
+                    "Runner2",
+                    pre_execute=TaskFunction(bind_async(log_pre, "Runner2")),
+                    execute=TaskFunction(bind_async(log_exec, "Runner2")),
+                    post_execute=TaskFunction(bind_async(log_post, "Runner2")),
+                ),
+                1,
+            )
+            .build()
+        )
+
+        async with processor.open(ctx) as runner:
+            await runner.run_next()  # Run pre phase only
+
+        self.assertIn("Runner2-pre", CALL_LOG)
+        self.assertIn("Runner2-post", CALL_LOG)
+        self.assertNotIn("Runner2-exec", CALL_LOG)
 
 
 if __name__ == "__main__":
