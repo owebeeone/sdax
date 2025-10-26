@@ -82,6 +82,24 @@ task = task_sync_func(sync_function, retries=1)
 # Use only for quick operations, not CPU-intensive work
 ```
 
+### `join()` - Graph Join Nodes
+```python
+from sdax import join, AsyncTask, task_func
+
+# Creates an empty "join" node in the graph
+# Acts as a synchronization point for multiple dependencies
+# A join node has no pre_execute, execute, or post_execute functions
+
+processor = (
+    AsyncDagTaskProcessor.builder()
+    .add_task(AsyncTask("TaskA", execute=task_func(func_a)), depends_on=())
+    .add_task(AsyncTask("TaskB", execute=task_func(func_b)), depends_on=())
+    .add_task(join("WaitForBoth"), depends_on=("TaskA", "TaskB"))  # Synchronizes TaskA and TaskB
+    .add_task(AsyncTask("TaskC", execute=task_func(func_c)), depends_on=("WaitForBoth",))
+    .build()
+)
+```
+
 ### Default Configuration
 All helpers provide sensible defaults:
 - `timeout=None` (infinite timeout)
@@ -229,7 +247,7 @@ In addition to level-based execution, sdax supports execution driven by a task d
 Advanced example with complex dependencies:
 
 ```python
-from sdax import AsyncTask, task_func, RetryableException
+from sdax import AsyncTask, task_func, join, RetryableException
 from sdax.sdax_core import AsyncDagTaskProcessor
 
 @dataclass
@@ -256,6 +274,14 @@ async def cleanup_db(ctx: DatabaseContext):
     if ctx.connection:
         await ctx.connection.close()
 
+async def save_results(ctx: DatabaseContext):
+    # Save processed results
+    await ctx.connection.save(ctx.user_data)
+
+async def notify_user(ctx: DatabaseContext):
+    # Send notification to user
+    await notification_service.send(ctx.user_data["user_id"])
+
 # Complex dependency graph with helper functions
 processor = (
     AsyncDagTaskProcessor[DatabaseContext]
@@ -263,7 +289,8 @@ processor = (
     .add_task(
         AsyncTask(
             name="ConnectDB", 
-            pre_execute=task_func(connect_db, timeout=5.0, retries=2)
+            pre_execute=task_func(connect_db, timeout=5.0, retries=2),
+            post_execute=task_func(cleanup_db)
         ), 
         depends_on=()
     )
@@ -289,11 +316,22 @@ processor = (
         depends_on=("LoadUser", "LoadCache")
     )
     .add_task(
+        join("SyncPoint"),
+        depends_on=("LoadUser", "LoadCache", "ProcessData")
+    )
+    .add_task(
         AsyncTask(
-            name="CleanupDB", 
-            post_execute=task_func(cleanup_db)
+            name="SaveResults", 
+            execute=task_func(save_results)
         ), 
-        depends_on=("ConnectDB",)
+        depends_on=("SyncPoint",)
+    )
+    .add_task(
+        AsyncTask(
+            name="SendNotification", 
+            execute=task_func(notify_user)
+        ), 
+        depends_on=("SyncPoint",)
     )
     .build()
 )

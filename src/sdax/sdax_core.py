@@ -6,14 +6,17 @@ This module contains the core engine classes for the SDAX framework.
 
 import asyncio
 import random
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from itertools import count
 from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Dict,
     Generic,
     Hashable,
@@ -21,12 +24,13 @@ from typing import (
     Literal,
     Mapping,
     Sequence,
+    Set,
     Tuple,
     TypeVar,
 )
 
 from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
-from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
+from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction, join
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable | str)
@@ -177,7 +181,7 @@ class PhaseContext(Generic[T, K]):
 
     @staticmethod
     def create_phase(phase_id: PhaseId) -> Phase[T, K]:
-        match (phase_id):
+        match phase_id:
             case PhaseId.PRE_EXEC:
                 return Phase(phase_id=phase_id, run=PhaseContext._run_pre_phase)
             case PhaseId.EXECUTE:
@@ -413,7 +417,6 @@ class PhaseContext(Generic[T, K]):
         return order
 
 
-
 class AsyncTaskProcessorBuilder(Generic[T, K], ABC):
     @abstractmethod
     def add_task(self, task: AsyncTask[T, K], level: int) -> "AsyncTaskProcessorBuilder[T, K]":
@@ -638,15 +641,23 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, LevelKey]):
     API matches AsyncTaskProcessorBuilder: add_task(task, level) -> self;
     build() -> AsyncDagTaskProcessor.
     """
-
-    _levels: Dict[int, List[AsyncTask[T, LevelKey]]] = field(
-        default_factory=lambda: defaultdict(list)
+    _builder_id_counter: ClassVar[count] = count(start=int(time.time()))
+    _id: int = field(
+        default_factory=lambda: next(AsyncDagLevelAdapterBuilder._builder_id_counter),
+        init=False
     )
+    _levels: Dict[int, List[AsyncTask[T, LevelKey]]] = field(
+        default_factory=lambda: defaultdict(list), init=False
+    )
+    _names: Set[LevelKey] = field(default_factory=set, init=False, repr=False)
 
     def add_task(
         self, task: AsyncTask[T, LevelKey], level: int
     ) -> "AsyncDagLevelAdapterBuilder[T]":
         self._levels[level].append(task)
+        if task.name in self._names:
+            raise ValueError(f"Attemping to add task name {task.name} that already exists")
+        self._names.add(task.name)
         return self
 
     def build(self) -> AsyncDagTaskProcessor[T, LevelKey]:
@@ -657,17 +668,17 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, LevelKey]):
         sorted_levels = sorted(self._levels.keys())
 
         def below_name(lvl: int) -> LevelKey:
-            return (lvl, "below")
+            return (lvl, "below", self._id)
 
         def above_name(lvl: int) -> LevelKey:
-            return (lvl, "above")
+            return (lvl, "above", self._id)
 
         # Create level nodes and tasks with appropriate dependencies
         prev_level: int | None = None
         for lvl in sorted_levels:
             # Ensure below node for this level; link to previous level's above node if exists
             deps_for_below = () if prev_level is None else (above_name(prev_level),)
-            builder.add_task(AsyncTask(name=below_name(lvl)), depends_on=deps_for_below)
+            builder.add_task(join(below_name(lvl)), depends_on=deps_for_below)
 
             # Add real tasks at this level depending on below node
             for task in self._levels[lvl]:
@@ -677,12 +688,11 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, LevelKey]):
             level_tasks = self._levels[lvl]
             if level_tasks:
                 builder.add_task(
-                    AsyncTask(name=above_name(lvl)),
+                    join(above_name(lvl)),
                     depends_on=tuple(t.name for t in level_tasks),
                 )
             else:
-                builder.add_task(
-                    AsyncTask(name=above_name(lvl)), depends_on=(below_name(lvl),))
+                builder.add_task(join(above_name(lvl)), depends_on=(below_name(lvl),))
 
             prev_level = lvl
 

@@ -4,6 +4,8 @@ Tests specific scenarios to ensure correctness.
 """
 
 import pytest
+
+from sdax import join
 from sdax.sdax_core import AsyncTask, TaskFunction
 from sdax.sdax_task_analyser import TaskAnalyzer
 
@@ -260,9 +262,9 @@ class TestNodeEdgeCases:
     def test_multiple_tasks_with_no_functions(self):
         """Graph with tasks that truly have no functions (do-nothing nodes)."""
         analyzer = TaskAnalyzer()
-        analyzer.add_task(AsyncTask(name="A"), depends_on=())
-        analyzer.add_task(AsyncTask(name="B"), depends_on=("A",))
-        analyzer.add_task(AsyncTask(name="C"), depends_on=("B",))
+        analyzer.add_task(join("A"), depends_on=())
+        analyzer.add_task(join("B"), depends_on=("A",))
+        analyzer.add_task(join("C"), depends_on=("B",))
 
         analysis = analyzer.analyze()
 

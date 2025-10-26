@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Join Node Helper**: Added `join()` function for creating empty graph synchronization points
+  - Creates empty graph nodes that act as synchronization points in task dependencies
+  - More idiomatic than creating empty AsyncTask instances
+  - Useful for coordinating multiple parallel tasks before downstream processing
+  - **Usage Example**:
+    ```python
+    from sdax import join
+    
+    # Create a synchronization point that waits for TaskA and TaskB
+    .add_task(join("SyncPoint"), depends_on=("TaskA", "TaskB"))
+    
+    # Multiple tasks can depend on the join node
+    .add_task(AsyncTask("Process"), depends_on=("SyncPoint",))
+    .add_task(AsyncTask("Notify"), depends_on=("SyncPoint",))
+    ```
+
 ## [0.7.0] - 2025-10-26
 
 ### Added
@@ -18,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `task_func()`: Creates standard TaskFunction with configurable timeout, retries, and exception handling
   - `task_group_task()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
   - `task_sync_func()`: Creates TaskFunction that wraps synchronous functions with async compatibility
+  - `join()`: Creates empty graph join nodes for synchronization points
   - All helpers provide sensible defaults for retry behavior and exception handling
   - Simplified TaskFunction creation with keyword-only parameters for better API ergonomics
   - **Usage Examples**:

@@ -150,3 +150,13 @@ def task_sync_func(
         has_task_group_argument=False
     )
 
+def join(name: K) -> AsyncTask[T, K]:
+    """Creates a "join" task, an empty node in the graph.
+
+    Its purpose is to act as a synchronization point, allowing downstream
+    tasks to depend on a single node that, in turn, waits for multiple
+    upstream dependencies.
+    """
+    # An AsyncTask with no functions does nothing. Its value is
+    # purely in the graph, as other tasks can depend on it.
+    return AsyncTask(name=name)
