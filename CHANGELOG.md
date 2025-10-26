@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Task Creation Helper**: Added `task()` function for creating AsyncTask instances
+  - Simplified syntax for creating tasks with name and phase functions
+  - More ergonomic than direct AsyncTask instantiation
+  - Validates that at least one phase function is provided
+  - **Usage Example**:
+    ```python
+    from sdax import task, task_func
+    
+    # Simple task creation
+    my_task = task("MyTask", execute=task_func(my_function))
+    
+    # Task with multiple phases
+    my_task = task("SetupAndCleanup", 
+                   pre_execute=task_func(setup),
+                   post_execute=task_func(cleanup))
+    ```
 - **Join Node Helper**: Added `join()` function for creating empty graph synchronization points
   - Creates empty graph nodes that act as synchronization points in task dependencies
   - More idiomatic than creating empty AsyncTask instances
@@ -33,9 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Backward compatible with existing string-based task names
 - **Task Function Helper Utilities**: Added convenience functions for creating TaskFunction instances
   - `task_func()`: Creates standard TaskFunction with configurable timeout, retries, and exception handling
-  - `task_group_task()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
+  - `task_group_func()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
   - `task_sync_func()`: Creates TaskFunction that wraps synchronous functions with async compatibility
-  - `join()`: Creates empty graph join nodes for synchronization points
   - All helpers provide sensible defaults for retry behavior and exception handling
   - Simplified TaskFunction creation with keyword-only parameters for better API ergonomics
   - **Usage Examples**:
@@ -48,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
                      retryable_exceptions=(ValueError, RuntimeError))
     
     # Task group variant
-    tg_task = task_group_task(my_group_function, retries=2)
+    tg_task = task_group_func(my_group_function, retries=2)
     
     # Synchronous function wrapper
     sync_task = task_sync_func(my_sync_function, retries=1)
@@ -93,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Backward compatible with existing string-based task names
 - **Task Function Helper Utilities**: Added convenience functions for creating TaskFunction instances
   - `task_func()`: Creates standard TaskFunction with configurable timeout, retries, and exception handling
-  - `task_group_task()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
+  - `task_group_func()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
   - `task_sync_func()`: Creates TaskFunction that wraps synchronous functions with async compatibility
   - All helpers provide sensible defaults for retry behavior and exception handling
   - Simplified TaskFunction creation with keyword-only parameters for better API ergonomics
@@ -107,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
                      retryable_exceptions=(ValueError, RuntimeError))
     
     # Task group variant
-    tg_task = task_group_task(my_group_function, retries=2)
+    tg_task = task_group_func(my_group_function, retries=2)
     
     # Synchronous function wrapper
     sync_task = task_sync_func(my_sync_function, retries=1)
@@ -175,7 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TaskFunction Creation**: Consider using the new helper functions for cleaner code
   - **Before**: `TaskFunction(function=my_func, timeout=30.0, retries=2, initial_delay=1.0, backoff_factor=2.0, retryable_exceptions=(TimeoutError, ConnectionError, Exception), has_task_group_argument=False)`
   - **After**: `task_func(my_func, timeout=30.0, retries=2)`
-  - **Task Group**: `task_group_task(my_func, timeout=30.0, retries=2)` instead of manually setting `has_task_group_argument=True`
+  - **Task Group**: `task_group_func(my_func, timeout=30.0, retries=2)` instead of manually setting `has_task_group_argument=True`
   - **Sync Functions**: `task_sync_func(my_sync_func, retries=2)` instead of manually wrapping with async wrapper
 - **Generic Key Types**: Existing string-based task names continue to work unchanged
   - New generic key support is opt-in and backward compatible

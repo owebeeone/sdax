@@ -54,16 +54,16 @@ task = task_func(my_function, timeout=30.0, retries=3,
                  retryable_exceptions=(ValueError, RuntimeError))
 ```
 
-### `task_group_task()` - Functions with TaskGroup Access
+### `task_group_func()` - Functions with TaskGroup Access
 ```python
-from sdax import task_group_task
+from sdax import task_group_func
 
 # For functions that need to create subtasks
 async def parent_task(ctx, task_group):
     subtask = task_group.create_task(subtask_func(), name="subtask")
     return await subtask
 
-task = task_group_task(parent_task, retries=2)
+task = task_group_func(parent_task, retries=2)
 ```
 
 ### `task_sync_func()` - Synchronous Function Wrapper
@@ -659,7 +659,7 @@ AsyncTask(
 Tasks can access the underlying `SdaxTaskGroup` for creating subtasks:
 
 ```python
-from sdax import task_group_task
+from sdax import task_group_func
 
 async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
     # Create subtasks using the task group
@@ -672,7 +672,7 @@ async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
 
 AsyncTask(
     name="ParentTask",
-    execute=task_group_task(parent_task)  # Helper automatically enables tg parameter
+    execute=task_group_func(parent_task)  # Helper automatically enables tg parameter
 )
 ```
 

@@ -77,7 +77,7 @@ class AsyncTask(Generic[T, K]):
 # Helper functions.
 
 def task_func(
-    function: Callable[[T], Awaitable[Any]], 
+    function: Callable[[T], Awaitable[Any]],
     *,
     timeout: float | None = None,  # None means no timeout
     retries: int = 0,
@@ -100,8 +100,8 @@ def task_func(
         has_task_group_argument=False
     )
 
-def task_group_task(
-    function: Callable[[T, SdaxTaskGroup], Awaitable[Any]], 
+def task_group_func(
+    function: Callable[[T, SdaxTaskGroup], Awaitable[Any]],
     *,
     timeout: float | None = None,  # None means no timeout
     retries: int = 0,
@@ -123,6 +123,9 @@ def task_group_task(
         retryable_exceptions=retryable_exceptions,
         has_task_group_argument=True
     )
+
+# Backward compatibility alias
+task_group_task = task_group_func
 
 def task_sync_func(
     function: Callable[[T], Any],
@@ -160,3 +163,28 @@ def join(name: K) -> AsyncTask[T, K]:
     # An AsyncTask with no functions does nothing. Its value is
     # purely in the graph, as other tasks can depend on it.
     return AsyncTask(name=name)
+
+def task(
+    name: K,
+    *,
+    pre_execute: TaskFunction[T] | None = None,
+    execute: TaskFunction[T] | None = None,
+    post_execute: TaskFunction[T] | None = None
+) -> AsyncTask[T, K]:
+    """Creates a task with one or more function phases.
+
+    At least one phase (pre_execute, execute, or post_execute)
+    must be provided. For an empty "join" node, use join() instead.
+    """
+    if pre_execute is None and execute is None and post_execute is None:
+        raise ValueError(
+            f"Task '{name}' must have at least one function. "
+            "For an empty synchronization node, use join() instead."
+        )
+
+    return AsyncTask(
+        name=name,
+        pre_execute=pre_execute,
+        execute=execute,
+        post_execute=post_execute
+    )
