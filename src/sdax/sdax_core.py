@@ -10,12 +10,28 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Awaitable, Callable, Dict, Generic, List, Mapping, Sequence, Tuple, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    ClassVar,
+    Dict,
+    Generic,
+    Hashable,
+    List,
+    Mapping,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
+
+from frozendict import frozendict
 
 from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
 from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
 
 T = TypeVar("T")
+K = TypeVar("K", bound=Hashable | str)
 
 
 class SdaxExecutionError(ExceptionGroup):
@@ -60,10 +76,12 @@ class _ExecutionContext(Generic[T]):
 @dataclass(frozen=True)
 class _TaskGroupWrapper(SdaxTaskGroup):
     """Wrapper for asyncio.TaskGroup to provide a SdaxTaskGroup interface."""
+
     task_group: asyncio.TaskGroup
 
     def create_task(
-        self, coro: Awaitable[Any], *, name: str | None = None, context: Any | None = None):
+        self, coro: Awaitable[Any], *, name: str | None = None, context: Any | None = None
+    ):
         return self.task_group.create_task(coro, name=name, context=context)
 
 
@@ -74,16 +92,16 @@ class PhaseId(Enum):
 
 
 @dataclass(slots=True)
-class Phase(Generic[T]):
+class Phase(Generic[T, K]):
     phase_id: PhaseId
     run: Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]
 
 
 @dataclass(slots=True)
-class PhaseContext(Generic[T]):
+class PhaseContext(Generic[T, K]):
     exec_ctx: _ExecutionContext[T]
-    analysis: TaskAnalysis[T]
-    tasks: Dict[str, AsyncTask[T]]
+    analysis: TaskAnalysis[T, K]
+    tasks: Dict[str, AsyncTask[T, K]]
     pre_started: set[str] = field(default_factory=set)
     pre_succeeded: set[str] = field(default_factory=set)
     pre_exception: BaseException | None = None
@@ -159,18 +177,16 @@ class PhaseContext(Generic[T]):
             else:
                 await self.on_task_complete(task_name)
 
-    def create_phase(self, phase_id: PhaseId) -> Phase[T]:
+    def create_phase(self, phase_id: PhaseId) -> Phase[T, K]:
         runner = self._phase_runner_map().get(phase_id)
         if runner is None:
             raise ValueError(f"Unsupported phase id {phase_id}")
         return Phase(phase_id=phase_id, run=runner)
 
-    def _phase_runner_map(self) -> Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]:
-        return {
-            PhaseId.PRE_EXEC: PhaseContext._run_pre_phase,
-            PhaseId.EXECUTE: PhaseContext._run_execute_phase,
-            PhaseId.POST_EXEC: PhaseContext._run_post_phase,
-        }
+    def _phase_runner_map(
+        self,
+    ) -> Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]:
+        return self.PHASE_MAP
 
     async def _run_pre_phase(self) -> PhaseId | None:
         pre_waves = self.analysis.pre_execute_graph.waves
@@ -276,7 +292,7 @@ class PhaseContext(Generic[T]):
             raise result
 
     async def _run_post_isolated(
-        self, task: AsyncTask[T], exec_ctx: _ExecutionContext[T]
+        self, task: AsyncTask[T, K], exec_ctx: _ExecutionContext[T]
     ) -> BaseException | None:
         if not task.post_execute:
             return None
@@ -397,47 +413,66 @@ class PhaseContext(Generic[T]):
                     queue.append(dependent)
         return order
 
+    PHASE_MAP: ClassVar[Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]] = (
+        frozendict({
+            PhaseId.PRE_EXEC: _run_pre_phase,
+            PhaseId.EXECUTE: _run_execute_phase,
+            PhaseId.POST_EXEC: _run_post_phase,
+        })
+    )
 
-class AsyncTaskProcessorBuilder(Generic[T], ABC):
+
+class AsyncTaskProcessorBuilder(Generic[T, K], ABC):
     @abstractmethod
-    def add_task(self, task: AsyncTask[T], level: int) -> "AsyncTaskProcessorBuilder[T]":
+    def add_task(self, task: AsyncTask[T, K], level: int) -> "AsyncTaskProcessorBuilder[T, K]":
         pass
 
     @abstractmethod
-    def build(self) -> "AsyncTaskProcessor[T]":
+    def build(self) -> "AsyncTaskProcessor[T, K]":
         pass
 
 
-class AsyncTaskProcessor(Generic[T], ABC):
+class AsyncTaskProcessor(Generic[T, K], ABC):
     """The core engine that processes a collection of async tasks."""
+
     @abstractmethod
     async def process_tasks(self, ctx: T):
         pass
 
     @abstractmethod
-    def open(self, ctx: T) -> "AsyncPhaseRunner[T]":
+    def open(self, ctx: T) -> "AsyncPhaseRunner[T, K]":
         pass
 
     @staticmethod
-    def builder() -> AsyncTaskProcessorBuilder[T]:
+    def builder() -> "AsyncTaskProcessorBuilder[T, str]":
+        """Create a builder for level-based / Elevator adapter task processor."""
+        return AsyncDagLevelAdapterBuilder[T]()
+
+    @staticmethod
+    def graph_builder() -> "AsyncDagTaskProcessorBuilder[T, K]":
+        """Create a builder for graph-based task processor."""
+        return AsyncDagTaskProcessorBuilder[T, K]()
+
+    @staticmethod
+    def elevator_builder() -> "AsyncTaskProcessorBuilder[T, str]":
         """Create a builder for level-based / Elevator adapter task processor."""
         return AsyncDagLevelAdapterBuilder[T]()
 
 
 @dataclass
-class AsyncDagTaskProcessorBuilder(Generic[T]):
+class AsyncDagTaskProcessorBuilder(Generic[T, K]):
     """Builder for DAG-based task processor.
-    This uses a TaskAnalyzer to build a TaskAnalysis graph, which is then used to 
+    This uses a TaskAnalyzer to build a TaskAnalysis graph, which is then used to
     create an AsyncDagTaskProcessor.
     """
 
-    taskAnalyzer: TaskAnalyzer[T] = field(default_factory=TaskAnalyzer)
+    taskAnalyzer: TaskAnalyzer[T, K] = field(default_factory=TaskAnalyzer)
 
     def add_task(
         self,
-        task: AsyncTask[T],
-        depends_on: Tuple[str, ...] = (),
-    ) -> "AsyncDagTaskProcessorBuilder[T]":
+        task: AsyncTask[T, K],
+        depends_on: Tuple[K, ...] = (),
+    ) -> "AsyncDagTaskProcessorBuilder[T, K]":
         """Add a task to the analyzer.
 
         Args:
@@ -453,19 +488,19 @@ class AsyncDagTaskProcessorBuilder(Generic[T]):
         self.taskAnalyzer.add_task(task, depends_on=depends_on)
         return self
 
-    def build(self) -> "AsyncDagTaskProcessor[T]":
+    def build(self) -> "AsyncDagTaskProcessor[T, K]":
         analysis = self.taskAnalyzer.analyze()
         return AsyncDagTaskProcessor(analysis=analysis)
 
 
 @dataclass(slots=True)
-class AsyncPhaseRunner(Generic[T]):
+class AsyncPhaseRunner(Generic[T, K]):
     """Async context manager that drives phase execution for a processor run."""
 
-    processor: "AsyncDagTaskProcessor[T]"
+    processor: "AsyncDagTaskProcessor[T, K]"
     ctx: T
-    _phase_ctx: PhaseContext[T] = field(init=False)
-    _current_phase: Phase[T] | None = field(init=False, default=None)
+    _phase_ctx: PhaseContext[T, K] = field(init=False)
+    _current_phase: Phase[T, K] | None = field(init=False, default=None)
     _next_phase_id: PhaseId | None = field(init=False, default=None)
     _last_phase_id: PhaseId | None = field(init=False, default=None)
     _phase_started: bool = field(init=False, default=False)
@@ -473,8 +508,8 @@ class AsyncPhaseRunner(Generic[T]):
 
     def __post_init__(self) -> None:
         analysis = self.processor.analysis
-        self._phase_ctx = PhaseContext[T](
-            exec_ctx=_ExecutionContext(user_context=self.ctx),
+        self._phase_ctx = PhaseContext[T, K](
+            exec_ctx=_ExecutionContext[T](user_context=self.ctx),
             analysis=analysis,
             tasks=dict(analysis.tasks),
         )
@@ -555,9 +590,7 @@ class AsyncPhaseRunner(Generic[T]):
     def has_failures(self) -> bool:
         """Return True if any exceptions occurred during execution."""
         ctx = self._phase_ctx
-        return bool(
-            ctx.pre_exception or ctx.exec_exception or ctx.post_exceptions
-        )
+        return bool(ctx.pre_exception or ctx.exec_exception or ctx.post_exceptions)
 
     def failures(self) -> list[BaseException]:
         """Return a list of all exceptions that occurred during execution."""
@@ -576,7 +609,7 @@ class AsyncPhaseRunner(Generic[T]):
 
 
 @dataclass(frozen=True)
-class AsyncDagTaskProcessor(Generic[T]):
+class AsyncDagTaskProcessor(Generic[T, K]):
     """Immutable DAG executor that consumes TaskAnalysis graphs.
 
     Execution policy:
@@ -585,12 +618,12 @@ class AsyncDagTaskProcessor(Generic[T]):
       - Post: per-task isolated TaskGroups driven by post graph and started set.
     """
 
-    analysis: TaskAnalysis[T]
+    analysis: TaskAnalysis[T, K]
 
     @staticmethod
-    def builder() -> AsyncDagTaskProcessorBuilder[T]:
+    def builder() -> AsyncDagTaskProcessorBuilder[T, K]:
         """Create a builder for a new AsyncDagTaskProcessor."""
-        return AsyncDagTaskProcessorBuilder[T]()
+        return AsyncDagTaskProcessorBuilder[T, K]()
 
     async def process_tasks(self, ctx: T):
         """Process all phases of a new execution of the processor."""
@@ -598,27 +631,27 @@ class AsyncDagTaskProcessor(Generic[T]):
             while await runner.run_next():
                 pass
 
-    def open(self, ctx: T) -> AsyncPhaseRunner[T]:
+    def open(self, ctx: T) -> AsyncPhaseRunner[T, K]:
         """Create a phase runner for advanced control over execution."""
-        return AsyncPhaseRunner(self, ctx)
+        return AsyncPhaseRunner[T, K](self, ctx)
 
 
 @dataclass
-class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T]):
+class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, str]):
     """Level-compatible builder that adapts to DAG by inserting level nodes.
 
     API matches AsyncTaskProcessorBuilder: add_task(task, level) -> self;
     build() -> AsyncDagTaskProcessor.
     """
 
-    _levels: Dict[int, List[AsyncTask[T]]] = field(default_factory=lambda: defaultdict(list))
+    _levels: Dict[int, List[AsyncTask[T, str]]] = field(default_factory=lambda: defaultdict(list))
 
-    def add_task(self, task: AsyncTask[T], level: int) -> "AsyncDagLevelAdapterBuilder[T]":
+    def add_task(self, task: AsyncTask[T, str], level: int) -> "AsyncDagLevelAdapterBuilder[T]":
         self._levels[level].append(task)
         return self
 
-    def build(self) -> AsyncDagTaskProcessor:
-        builder = AsyncDagTaskProcessor[T].builder()
+    def build(self) -> AsyncDagTaskProcessor[T, str]:
+        builder = AsyncDagTaskProcessor[T, str].builder()
         if not self._levels:
             return builder.build()
 
@@ -649,7 +682,8 @@ class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T]):
                     depends_on=tuple(t.name for t in level_tasks),
                 )
             else:
-                builder.add_task(AsyncTask(name=above_name(lvl)), depends_on=(below_name(lvl),))
+                builder.add_task(
+                    AsyncTask(name=above_name(lvl)), depends_on=(below_name(lvl),))
 
             prev_level = lvl
 

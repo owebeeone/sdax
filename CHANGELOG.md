@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2024-12-19
+## [0.6.1] - 2024-12-19
 
 ### Added
 - **Phase-by-Phase Execution API**: New advanced execution model for fine-grained control over task phases
@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Default Timeout Behavior**: Changed default timeout/deadline from a fixed value to `None` (infinite timeout)
   - Tasks now run indefinitely by default unless explicitly configured with a timeout
   - This provides more predictable behavior for long-running operations
+- **Version Management**: Updated version handling to accommodate documentation changes
 - Enhanced `AsyncTaskProcessor` with new `open()` method for phased execution
 - Updated public API exports to include new error handling utilities
 

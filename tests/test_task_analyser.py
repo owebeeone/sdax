@@ -3,13 +3,16 @@
 Tests complex dependency graphs to validate wave construction assumptions.
 """
 
+from typing import Any
+
 import pytest
+
 from sdax.sdax_core import AsyncTask, TaskFunction
 from sdax.sdax_task_analyser import TaskAnalyzer
 
 
 # Helper functions for creating test tasks
-async def dummy_func(ctx):
+async def dummy_func(ctx: Any):
     """Dummy function for testing."""
     pass
 
@@ -113,9 +116,7 @@ def format_wave_structure(graph) -> str:
     lines = []
     for wave in graph.waves:
         deps = wave.depends_on_tasks
-        deps_str = (
-            f"depends_on_tasks={deps}" if deps else "no deps"
-        )
+        deps_str = f"depends_on_tasks={deps}" if deps else "no deps"
         tasks_str = ", ".join(wave.tasks)
         lines.append(f"Wave {wave.wave_num}: [{tasks_str}] ({deps_str})")
     return "\n".join(lines)
@@ -126,7 +127,7 @@ class TestBasicGraphs:
 
     def test_simple_linear_chain(self):
         """A -> B -> C: Simple linear dependency chain."""
-        analyzer = TaskAnalyzer()
+        analyzer = TaskAnalyzer[Any, str]()
         analyzer.add_task(make_task("A", has_pre=True, has_post=True), depends_on=())
         analyzer.add_task(make_task("B", has_pre=True, has_post=True), depends_on=("A",))
         analyzer.add_task(make_task("C", has_pre=True, has_post=True), depends_on=("B",))
@@ -671,6 +672,8 @@ class TestPostExecuteGraphs:
         assert w0.depends_on_tasks == ()
         assert w1.tasks == ("B",)
         assert set(w1.depends_on_tasks) == {"D"}
+
+
 class TestErrorCases:
     """Test error handling."""
 
@@ -735,7 +738,7 @@ class TestRandomGraph:
         """
         import random
 
-        #random.seed(42)  # For reproducibility
+        # random.seed(42)  # For reproducibility
 
         analyzer = TaskAnalyzer()
         task_names = [f"T{i:02d}" for i in range(20)]

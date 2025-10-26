@@ -16,21 +16,24 @@ Design goals:
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Dict, Generic, List, Set, Tuple, TypeVar
+from typing import Dict, Generic, Hashable, List, Set, Tuple, TypeVar
 
 from sdax.tasks import AsyncTask
 
+T = TypeVar("T")
+K = TypeVar("K", bound=Hashable | str)
+
 
 @dataclass(frozen=True)
-class ExecutionWave:
+class ExecutionWave(Generic[K]):
     """A wave of tasks that can execute together.
 
     Start barrier only: all tasks share the same predecessor task set.
     """
 
     wave_num: int
-    tasks: Tuple[str, ...]
-    depends_on_tasks: Tuple[str, ...] = ()  # Predecessor task names (effective deps)
+    tasks: Tuple[K, ...]
+    depends_on_tasks: Tuple[K, ...] = ()  # Predecessor task names (effective deps)
 
     def __repr__(self):
         deps_str = (
@@ -42,7 +45,7 @@ class ExecutionWave:
 
 
 @dataclass(frozen=True)
-class ExecutionGraph:
+class ExecutionGraph(Generic[K]):
     """Complete execution graph with waves (start barriers).
 
     Waves group tasks by identical effective predecessors for a given phase.
@@ -50,7 +53,7 @@ class ExecutionGraph:
 
     waves: Tuple[ExecutionWave, ...]
 
-    def wave_containing(self, task_name: str) -> ExecutionWave | None:
+    def wave_containing(self, task_name: K) -> ExecutionWave | None:
         """Find the wave that contains the given task.
 
         Args:
@@ -70,34 +73,33 @@ class ExecutionGraph:
             lines.append(f"  {wave}")
         return "\n".join(lines)
 
-T = TypeVar("T")
 
 @dataclass(frozen=True)
-class TaskAnalysis(Generic[T]):
+class TaskAnalysis(Generic[T, K]):
     """Complete analysis of a task dependency graph."""
 
-    tasks: Dict[str, AsyncTask]
-    dependencies: Dict[str, Tuple[str, ...]]
+    tasks: Dict[K, AsyncTask[T, K]]
+    dependencies: Dict[K, Tuple[K, ...]]
     pre_execute_graph: ExecutionGraph
     post_execute_graph: ExecutionGraph
     pre_root_wave_id: int | None
     post_root_wave_id: int | None
 
     # Optional runtime convenience metadata (derived, provided at init by analyzer)
-    wave_index_by_task: Dict[str, int]
-    task_to_consumer_waves: Dict[str, Tuple[int, ...]]
+    wave_index_by_task: Dict[K, int]
+    task_to_consumer_waves: Dict[K, Tuple[int, ...]]
     wave_dep_count: Tuple[int, ...]
     # Post-exec convenience metadata (reverse)
-    post_wave_index_by_task: Dict[str, int]
-    post_task_to_consumer_waves: Dict[str, Tuple[int, ...]]
+    post_wave_index_by_task: Dict[K, int]
+    post_task_to_consumer_waves: Dict[K, Tuple[int, ...]]
     post_wave_dep_count: Tuple[int, ...]
     # Precomputed task name lists per phase
-    pre_task_names: Tuple[str, ...]
-    execute_task_names: Tuple[str, ...]
-    post_task_names: Tuple[str, ...]
+    pre_task_names: Tuple[K, ...]
+    execute_task_names: Tuple[K, ...]
+    post_task_names: Tuple[K, ...]
     # Additional metadata for runtime scheduling
-    post_only_task_names: Tuple[str, ...]
-    topological_order: Tuple[str, ...]
+    post_only_task_names: Tuple[K, ...]
+    topological_order: Tuple[K, ...]
 
     # Statistics
     total_tasks: int
@@ -108,7 +110,7 @@ class TaskAnalysis(Generic[T]):
     max_pre_wave_num: int
     max_post_wave_num: int
 
-    def pre_wave_containing(self, task_name: str) -> ExecutionWave | None:
+    def pre_wave_containing(self, task_name: K) -> ExecutionWave | None:
         """Find the pre-execute wave that contains the given task.
 
         Args:
@@ -119,7 +121,7 @@ class TaskAnalysis(Generic[T]):
         """
         return self.pre_execute_graph.wave_containing(task_name)
 
-    def post_wave_containing(self, task_name: str) -> ExecutionWave | None:
+    def post_wave_containing(self, task_name: K) -> ExecutionWave | None:
         """Find the post-execute wave that contains the given task.
 
         Args:
@@ -150,7 +152,7 @@ class TaskAnalysis(Generic[T]):
 
 
 @dataclass
-class TaskAnalyzer(Generic[T]):
+class TaskAnalyzer(Generic[T, K]):
     """Builds wave schedules from a task dependency graph.
 
     Responsibilities:
@@ -160,18 +162,18 @@ class TaskAnalyzer(Generic[T]):
     - Provide immutable analysis + convenience metadata for the runtime.
     """
 
-    tasks: Dict[str, AsyncTask[T]] = field(default_factory=dict)
-    dependencies: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    tasks: Dict[K, AsyncTask[T, K]] = field(default_factory=dict)
+    dependencies: Dict[K, Tuple[K, ...]] = field(default_factory=dict)
     # Pre-exec metadata storage for analyze() output
-    _pre_wave_index_by_task: Dict[str, int] = field(default_factory=dict)
-    _pre_task_to_consumer_waves: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
+    _pre_wave_index_by_task: Dict[K, int] = field(default_factory=dict)
+    _pre_task_to_consumer_waves: Dict[K, Tuple[int, ...]] = field(default_factory=dict)
     _pre_wave_dep_count: Dict[int, int] = field(default_factory=dict)
 
     def add_task(
         self,
-        task: AsyncTask[T],
-        depends_on: Tuple[str, ...] = (),
-    ) -> "TaskAnalyzer[T]":
+        task: AsyncTask[T, K],
+        depends_on: Tuple[K, ...] = (),
+    ) -> "TaskAnalyzer[T, K]":
         """Add a task to the analyzer.
 
         Args:
@@ -191,7 +193,7 @@ class TaskAnalyzer(Generic[T]):
         self.dependencies[task.name] = depends_on
         return self
 
-    def analyze(self) -> TaskAnalysis[T]:
+    def analyze(self) -> TaskAnalysis[T, K]:
         """Analyze the task graph and build execution waves.
 
         Returns:
@@ -260,7 +262,7 @@ class TaskAnalyzer(Generic[T]):
         """Detect cycles in the dependency graph using DFS."""
         color = {task: "WHITE" for task in self.tasks}
 
-        def dfs(node: str, path: List[str]):
+        def dfs(node: K, path: List[K]):
             color[node] = "GRAY"
             path.append(node)
 
@@ -306,11 +308,11 @@ class TaskAnalyzer(Generic[T]):
 
     def _get_effective_deps(
         self,
-        task_name: str,
-        tasks_with_phase: Set[str],
-        visited: Set[str] = None,
-        cache: Dict[str, Set[str]] | None = None,
-    ) -> Set[str]:
+        task_name: K,
+        tasks_with_phase: Set[K],
+        visited: Set[K] = None,
+        cache: Dict[K, Set[K]] | None = None,
+    ) -> Set[K]:
         """Get all transitive dependencies that have a specific phase.
 
         This follows through nodes (tasks without the phase) to find
@@ -360,11 +362,11 @@ class TaskAnalyzer(Generic[T]):
         # Compute wave assignments
         task_wave = {}
         waves_dict = defaultdict(list)
-        wave_depends_on_tasks: Dict[int, Tuple[str, ...]] = {}
+        wave_depends_on_tasks: Dict[int, Tuple[K, ...]] = {}
         # Grouping maps: signature of effective dependencies -> assigned wave
-        signature_to_wave: Dict[Tuple[str, ...], int] = {}
-        wave_signature: Dict[int, Tuple[str, ...]] = {}
-        eff_cache: Dict[str, Set[str]] = {}
+        signature_to_wave: Dict[Tuple[K, ...], int] = {}
+        wave_signature: Dict[int, Tuple[K, ...]] = {}
+        eff_cache: Dict[K, Set[K]] = {}
 
         # Use topological sort to process in order
         topo_order = getattr(self, "_topological_order", None)
@@ -421,11 +423,11 @@ class TaskAnalyzer(Generic[T]):
         self._pre_root_wave_id = root_waves[0] if root_waves else None
 
         # Build runtime convenience metadata
-        wave_index_by_task: Dict[str, int] = {}
+        wave_index_by_task: Dict[K, int] = {}
         for w in pre_graph.waves:
             for t in w.tasks:
                 wave_index_by_task[t] = w.wave_num
-        task_to_consumer_waves_mut: Dict[str, Set[int]] = defaultdict(set)
+        task_to_consumer_waves_mut: Dict[K, Set[int]] = defaultdict(set)
         for w in pre_graph.waves:
             for dep_task in w.depends_on_tasks:
                 task_to_consumer_waves_mut[dep_task].add(w.wave_num)
@@ -463,9 +465,9 @@ class TaskAnalyzer(Generic[T]):
                 dependents[dep].append(task)
 
         # Helper: effective post dependents (follow through non-post nodes)
-        eff_post_dep_cache: Dict[str, Set[str]] = {}
+        eff_post_dep_cache: Dict[K, Set[K]] = {}
 
-        def get_effective_post_dependents(task_name: str, visited: Set[str] | None = None) -> Set[str]:
+        def get_effective_post_dependents(task_name: K, visited: Set[K] | None = None) -> Set[K]:
             if visited is None:
                 visited = set()
             if task_name in eff_post_dep_cache:
@@ -474,7 +476,7 @@ class TaskAnalyzer(Generic[T]):
                 return set()
             visited.add(task_name)
 
-            effective: Set[str] = set()
+            effective: Set[K] = set()
             for d in dependents.get(task_name, []):
                 if d in post_exec_tasks:
                     effective.add(d)
@@ -485,9 +487,9 @@ class TaskAnalyzer(Generic[T]):
             return effective
 
         # Helper: nearest post dependents (first post tasks reachable via any path)
-        nearest_post_dep_cache: Dict[str, Set[str]] = {}
+        nearest_post_dep_cache: Dict[K, Set[K]] = {}
 
-        def get_nearest_post_dependents(task_name: str, visited: Set[str] | None = None) -> Set[str]:
+        def get_nearest_post_dependents(task_name: K, visited: Set[K] | None = None) -> Set[K]:
             if visited is None:
                 visited = set()
             if task_name in nearest_post_dep_cache:
@@ -496,7 +498,7 @@ class TaskAnalyzer(Generic[T]):
                 return set()
             visited.add(task_name)
 
-            nearest: Set[str] = set()
+            nearest: Set[K] = set()
             for d in dependents.get(task_name, []):
                 if d in post_exec_tasks:
                     # First post task on this path → include and do not traverse past it
@@ -511,7 +513,7 @@ class TaskAnalyzer(Generic[T]):
         # Compute reverse wave assignments (by reverse depth over effective post dependents)
         task_wave = {}
         waves_dict = defaultdict(list)
-        wave_depends_on_tasks: Dict[int, Tuple[str, ...]] = {}
+        wave_depends_on_tasks: Dict[int, Tuple[K, ...]] = {}
 
         # Reverse topo ensures we place dependents first
         topo_order = getattr(self, "_topological_order", None)
@@ -564,11 +566,11 @@ class TaskAnalyzer(Generic[T]):
         self._post_root_wave_id = post_root_waves[0] if post_root_waves else None
 
         # Build post convenience metadata (reverse)
-        post_wave_index_by_task: Dict[str, int] = {}
+        post_wave_index_by_task: Dict[K, int] = {}
         for w in post_graph.waves:
             for t in w.tasks:
                 post_wave_index_by_task[t] = w.wave_num
-        post_task_to_consumer_waves_mut: Dict[str, Set[int]] = defaultdict(set)
+        post_task_to_consumer_waves_mut: Dict[K, Set[int]] = defaultdict(set)
         for w in post_graph.waves:
             for dep_task in w.depends_on_tasks:
                 post_task_to_consumer_waves_mut[dep_task].add(w.wave_num)
@@ -585,7 +587,7 @@ class TaskAnalyzer(Generic[T]):
 
     # Legacy function removed: wave dependencies by index no longer computed
 
-    def _compute_statistics(self) -> Dict:
+    def _compute_statistics(self) -> Dict[str, int]:
         """Compute statistics about the task graph."""
         stats = {
             "total_tasks": len(self.tasks),

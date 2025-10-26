@@ -5,9 +5,10 @@ Task group classes.
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, Hashable, TypeVar
 
 T = TypeVar("T")
+K = TypeVar("K", bound=Hashable | str)
 
 
 class RetryableException(BaseException):
@@ -52,11 +53,11 @@ class TaskFunction(Generic[T]):
 
 
 @dataclass(frozen=True, eq=False, order=False, slots=True)
-class AsyncTask(Generic[T]):
+class AsyncTask(Generic[T, K]):
     """A declarative definition of a task with optional pre-execute, execute,
     and post-execute phases, each with its own configuration."""
 
-    name: str
+    name: K
     pre_execute: TaskFunction[T] | None = None
     execute: TaskFunction[T] | None = None
     post_execute: TaskFunction[T] | None = None
