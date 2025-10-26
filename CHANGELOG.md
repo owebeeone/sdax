@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Generic Key Type Support**: Added support for custom key types in task names
+  - `K` type parameter with `Hashable | str` bound for flexible key types
+  - `LevelKey` type alias for level-based task naming: `Tuple[int, Literal["below"]] | Tuple[int, Literal["above"]] | str`
+  - Backward compatible with existing string-based task names
+- **Task Function Helper Utilities**: Added convenience functions for creating TaskFunction instances
+  - `task_func()`: Creates standard TaskFunction with configurable timeout, retries, and exception handling
+  - `task_group_task()`: Creates TaskFunction that receives SdaxTaskGroup as second argument
+  - `task_sync_func()`: Creates TaskFunction that wraps synchronous functions with async compatibility
+  - All helpers provide sensible defaults for retry behavior and exception handling
+  - Simplified TaskFunction creation with keyword-only parameters for better API ergonomics
+  - **Usage Examples**:
+    ```python
+    # Simple usage
+    task = task_func(my_async_function)
+    
+    # With custom configuration
+    task = task_func(my_function, timeout=30.0, retries=3, 
+                     retryable_exceptions=(ValueError, RuntimeError))
+    
+    # Task group variant
+    tg_task = task_group_task(my_group_function, retries=2)
+    
+    # Synchronous function wrapper
+    sync_task = task_sync_func(my_sync_function, retries=1)
+    ```
+  - **Default Configuration**:
+    - `timeout=None` (infinite timeout)
+    - `retries=0` (no retries)
+    - `initial_delay=1.0` seconds
+    - `backoff_factor=2.0` (exponential backoff)
+    - `retryable_exceptions=(TimeoutError, ConnectionError, RetryableException)`
+
+### Changed
+- **Enhanced Level Adapter**: Improved level-based task naming system
+  - Level nodes now use structured keys `(level, "below")` and `(level, "above")` instead of string concatenation
+  - More type-safe and efficient level node management
+  - Better integration with generic key type system
+
+### Removed
+- **Dependency Cleanup**: Removed unused `frozendict` dependency
+  - Simplified project dependencies
+  - Reduced external dependency footprint
+
+### Improved
+- **Developer Experience**: Enhanced API ergonomics with helper functions
+  - Reduced boilerplate code for TaskFunction creation
+  - Keyword-only parameters prevent common configuration errors
+  - Clear separation between standard and task-group variants
+- **Code Maintainability**: Simplified internal phase management
+  - Replaced complex dictionary mapping with direct method dispatch
+  - More explicit and easier to understand phase creation logic
+  - Reduced cognitive load for developers working with the codebase
+- **Type Safety**: Enhanced generic type support
+  - Better type inference for custom key types
+  - Structured level keys provide compile-time safety
+  - Improved IDE support and autocompletion
+
 ## [0.6.1] - 2025-10-25
 
 ### Added
@@ -35,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Old behavior: Tasks had a default timeout
   - New behavior: Tasks run indefinitely unless `timeout` parameter is specified
   - Example: `TaskFunction(my_func, timeout=30.0)` for 30-second timeout
+- **TaskFunction Creation**: Consider using the new helper functions for cleaner code
+  - **Before**: `TaskFunction(function=my_func, timeout=30.0, retries=2, initial_delay=1.0, backoff_factor=2.0, retryable_exceptions=(TimeoutError, ConnectionError, Exception), has_task_group_argument=False)`
+  - **After**: `task_func(my_func, timeout=30.0, retries=2)`
+  - **Task Group**: `task_group_task(my_func, timeout=30.0, retries=2)` instead of manually setting `has_task_group_argument=True`
+  - **Sync Functions**: `task_sync_func(my_sync_func, retries=2)` instead of manually wrapping with async wrapper
+- **Generic Key Types**: Existing string-based task names continue to work unchanged
+  - New generic key support is opt-in and backward compatible
+  - Level adapter now uses structured tuple keys internally but maintains string compatibility
 - New phased execution API is completely optional
 - All other existing APIs remain fully compatible
 

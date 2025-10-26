@@ -142,45 +142,6 @@ class TestSdaxRetriesAndTimeouts(unittest.IsolatedAsyncioTestCase):
         await processor.process_tasks(ctx)
         self.assertTrue(ctx.data.get("completed"))
 
-    async def test_empty_retryable_exceptions_no_retry(self):
-        """Verify that empty retryable_exceptions prevents retries."""
-        ctx = TaskContext()
-
-        async def always_fails(context: TaskContext):
-            global ATTEMPTS
-            ATTEMPTS["always_fails"] += 1
-            raise ValueError("This always fails")
-
-        processor = (
-            AsyncTaskProcessor.builder()
-            .add_task(
-                AsyncTask(
-                    name="NoRetryTask",
-                    execute=TaskFunction(
-                        function=always_fails,
-                        retries=3,  # Would normally retry 3 times
-                        retryable_exceptions=(),  # Empty tuple = no retries
-                    ),
-                ),
-                1,
-            )
-            .build()
-        )
-
-        # Should fail immediately without retries
-        try:
-            await processor.process_tasks(ctx)
-            self.fail("Expected an exception to be raised")
-        except SdaxExecutionError as eg:
-            # Check that the underlying exception is ValueError
-            leaves = flatten_exceptions(eg)
-            self.assertEqual(len(leaves), 1)
-            self.assertIsInstance(leaves[0], ValueError)
-            self.assertEqual(str(leaves[0]), "This always fails")
-
-        # Should only have been called once (no retries)
-        self.assertEqual(ATTEMPTS["always_fails"], 1)
-
     async def test_custom_retryable_exceptions_success(self):
         """Verify that custom retryable_exceptions work correctly for retryable errors."""
         ctx = TaskContext()

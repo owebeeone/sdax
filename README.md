@@ -38,6 +38,58 @@ cd sdax
 pip install -e .
 ```
 
+## TaskFunction Helper Functions
+
+SDAX provides convenient helper functions to simplify TaskFunction creation:
+
+### `task_func()` - Standard Async Functions
+```python
+from sdax import task_func
+
+# Simple usage
+task = task_func(my_async_function)
+
+# With custom configuration
+task = task_func(my_function, timeout=30.0, retries=3, 
+                 retryable_exceptions=(ValueError, RuntimeError))
+```
+
+### `task_group_task()` - Functions with TaskGroup Access
+```python
+from sdax import task_group_task
+
+# For functions that need to create subtasks
+async def parent_task(ctx, task_group):
+    subtask = task_group.create_task(subtask_func(), name="subtask")
+    return await subtask
+
+task = task_group_task(parent_task, retries=2)
+```
+
+### `task_sync_func()` - Synchronous Function Wrapper
+```python
+from sdax import task_sync_func
+
+# Wrap synchronous functions for async compatibility
+def sync_function(ctx):
+    # Quick synchronous work (validation, simple calculations)
+    ctx["result"] = ctx.get("input", 0) * 2
+    return ctx["result"]
+
+task = task_sync_func(sync_function, retries=1)
+
+# ⚠️ WARNING: Sync functions block the event loop!
+# Use only for quick operations, not CPU-intensive work
+```
+
+### Default Configuration
+All helpers provide sensible defaults:
+- `timeout=None` (infinite timeout)
+- `retries=0` (no retries)
+- `initial_delay=1.0` seconds
+- `backoff_factor=2.0` (exponential backoff)
+- `retryable_exceptions=(TimeoutError, ConnectionError, RetryableException)`
+
 ## Quick Start
 
 Graph-based (task dependency graph):
@@ -45,7 +97,7 @@ Graph-based (task dependency graph):
 ```python
 import asyncio
 from dataclasses import dataclass
-from sdax import AsyncTask, TaskFunction
+from sdax import AsyncTask, task_func
 from sdax.sdax_core import AsyncDagTaskProcessor
 
 @dataclass
@@ -76,28 +128,28 @@ async def fetch_user_data(ctx: TaskContext):
         raise ValueError("Auth failed")
     await asyncio.sleep(0.1)
 
-# Fluent builder pattern with generic type parameter
+# Fluent builder pattern with helper functions
 processor = (
     AsyncDagTaskProcessor[TaskContext]
     .builder()
     .add_task(
         AsyncTask(
             name="Database", 
-            pre_execute=TaskFunction(open_db), 
-            post_execute=TaskFunction(close_db)
+            pre_execute=task_func(open_db), 
+            post_execute=task_func(close_db)
         ), 
         depends_on=()
     )
     .add_task(
-        AsyncTask(name="Auth", pre_execute=TaskFunction(check_auth)), 
+        AsyncTask(name="Auth", pre_execute=task_func(check_auth)), 
         depends_on=("Database",)
     )
     .add_task(
-        AsyncTask(name="Flags", pre_execute=TaskFunction(load_feature_flags)), 
+        AsyncTask(name="Flags", pre_execute=task_func(load_feature_flags)), 
         depends_on=("Database",)
     )
     .add_task(
-        AsyncTask(name="Fetch", execute=TaskFunction(fetch_user_data)), 
+        AsyncTask(name="Fetch", execute=task_func(fetch_user_data)), 
         depends_on=("Auth",)
     )
     .build()
@@ -106,17 +158,19 @@ processor = (
 # await processor.process_tasks(TaskContext())
 ```
 
+**Note**: Task names use string keys by default, but SDAX supports generic key types for more complex scenarios (see Advanced Features).
+
 Elevator adapter (level-based API; builds a graph under the hood):
 
 ```python
-from sdax import AsyncTaskProcessor, AsyncTask, TaskFunction
+from sdax import AsyncTaskProcessor, AsyncTask, task_func
 
 processor = (
     AsyncTaskProcessor.builder()
-    .add_task(AsyncTask("Database", pre_execute=TaskFunction(open_db), post_execute=TaskFunction(close_db)), level=0)
-    .add_task(AsyncTask("Auth", pre_execute=TaskFunction(check_auth)), level=1)
-    .add_task(AsyncTask("Flags", pre_execute=TaskFunction(load_feature_flags)), level=1)
-    .add_task(AsyncTask("Fetch", execute=TaskFunction(fetch_user_data)), level=2)
+    .add_task(AsyncTask("Database", pre_execute=task_func(open_db), post_execute=task_func(close_db)), level=0)
+    .add_task(AsyncTask("Auth", pre_execute=task_func(check_auth)), level=1)
+    .add_task(AsyncTask("Flags", pre_execute=task_func(load_feature_flags)), level=1)
+    .add_task(AsyncTask("Fetch", execute=task_func(fetch_user_data)), level=2)
     .build()
 )
 # await processor.process_tasks(TaskContext())
@@ -175,7 +229,7 @@ In addition to level-based execution, sdax supports execution driven by a task d
 Advanced example with complex dependencies:
 
 ```python
-from sdax import AsyncTask, TaskFunction, RetryableException
+from sdax import AsyncTask, task_func, RetryableException
 from sdax.sdax_core import AsyncDagTaskProcessor
 
 @dataclass
@@ -202,42 +256,42 @@ async def cleanup_db(ctx: DatabaseContext):
     if ctx.connection:
         await ctx.connection.close()
 
-# Complex dependency graph with fluent builder
+# Complex dependency graph with helper functions
 processor = (
     AsyncDagTaskProcessor[DatabaseContext]
     .builder()
     .add_task(
         AsyncTask(
             name="ConnectDB", 
-            pre_execute=TaskFunction(connect_db, timeout=5.0, retries=2)
+            pre_execute=task_func(connect_db, timeout=5.0, retries=2)
         ), 
         depends_on=()
     )
     .add_task(
         AsyncTask(
             name="LoadUser", 
-            execute=TaskFunction(load_user, retryable_exceptions=(ConnectionError,))
+            execute=task_func(load_user, retryable_exceptions=(ConnectionError,))
         ), 
         depends_on=("ConnectDB",)
     )
     .add_task(
         AsyncTask(
             name="LoadCache", 
-            execute=TaskFunction(load_cache, timeout=3.0)
+            execute=task_func(load_cache, timeout=3.0)
         ), 
         depends_on=("ConnectDB",)
     )
     .add_task(
         AsyncTask(
             name="ProcessData", 
-            execute=TaskFunction(process_data)
+            execute=task_func(process_data)
         ), 
         depends_on=("LoadUser", "LoadCache")
     )
     .add_task(
         AsyncTask(
             name="CleanupDB", 
-            post_execute=TaskFunction(cleanup_db)
+            post_execute=task_func(cleanup_db)
         ), 
         depends_on=("ConnectDB",)
     )
@@ -337,23 +391,90 @@ Notes:
    Level 3: [Deploy, NotifySlack]
    ```
 
-4. **High-Throughput API Server** (Concurrent Execution)
-   ```python
-   # Build immutable workflow once at startup
-   processor = (
-       AsyncTaskProcessor.builder()
-       .add_task(AsyncTask("Auth", ...), level=1)
-       .add_task(AsyncTask("FetchData", ...), level=2)
-       .build()
-   )
-   
-   # Reuse processor for thousands of concurrent requests
-   @app.post("/api/endpoint")
-   async def handle_request(user_id: int):
-       ctx = RequestContext(user_id=user_id)
-       await processor.process_tasks(ctx)
-       return ctx.results
-   ```
+### Mixing Synchronous and Asynchronous Functions
+
+You can mix synchronous and asynchronous functions in the same processor, but **be aware that synchronous functions block the event loop** and prevent parallelism:
+
+```python
+from sdax import task_func, task_sync_func
+import time
+
+def sync_data_processor(ctx):
+    # Synchronous CPU-intensive work - BLOCKS the event loop!
+    ctx["processed_data"] = []
+    for item in ctx.get("raw_data", []):
+        # Simulate CPU work (sorting, calculations, etc.)
+        time.sleep(0.1)  # This blocks ALL other tasks!
+        ctx["processed_data"].append(item * 2)
+    ctx["processing_complete"] = True
+
+async def async_api_call(ctx):
+    # Asynchronous I/O - allows other tasks to run concurrently
+    response = await httpx.get("https://api.example.com/data")
+    ctx["api_data"] = response.json()
+
+processor = (
+    AsyncTaskProcessor.builder()
+    .add_task(AsyncTask("ProcessData", execute=task_sync_func(sync_data_processor)), level=1)
+    .add_task(AsyncTask("FetchAPI", execute=task_func(async_api_call)), level=1)
+    .build()
+)
+```
+
+**⚠️ Important Limitations:**
+- **Synchronous functions block the entire event loop** - no other tasks can run while they execute
+- **Use sync functions only for quick operations** (data validation, simple calculations)
+- **For CPU-intensive work**, consider using `asyncio.to_thread()` or separate processes
+- **I/O operations should always be async** to maintain parallelism
+
+**✅ Good Use Cases for Sync Functions:**
+```python
+def validate_user_input(ctx):
+    # Quick validation - doesn't block for long
+    user_id = ctx.get("user_id")
+    if not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("Invalid user ID")
+    ctx["validated"] = True
+
+def format_response_data(ctx):
+    # Simple data transformation
+    ctx["formatted_data"] = {
+        "user_id": ctx["user_id"],
+        "timestamp": ctx.get("timestamp", "unknown")
+    }
+```
+
+**❌ Bad Use Cases for Sync Functions:**
+```python
+def bad_cpu_intensive_work(ctx):
+    # DON'T DO THIS - blocks everything!
+    for i in range(1000000):
+        complex_calculation()  # Blocks all other tasks
+    ctx["result"] = "done"
+
+def bad_file_io(ctx):
+    # DON'T DO THIS - use async I/O instead
+    with open("large_file.txt") as f:
+        ctx["data"] = f.read()  # Blocks the event loop
+```
+
+### High-Throughput API Server (Concurrent Execution)
+```python
+# Build immutable workflow once at startup
+processor = (
+    AsyncTaskProcessor.builder()
+    .add_task(AsyncTask("Auth", ...), level=1)
+    .add_task(AsyncTask("FetchData", ...), level=2)
+    .build()
+)
+
+# Reuse processor for thousands of concurrent requests
+@app.post("/api/endpoint")
+async def handle_request(user_id: int):
+    ctx = RequestContext(user_id=user_id)
+    await processor.process_tasks(ctx)
+    return ctx.results
+```
 
 ## Error Handling
 
@@ -388,15 +509,95 @@ except SdaxExecutionError as exc:
 
 ## Advanced Features
 
+### Generic Key Types for Task Names
+
+SDAX supports flexible key types for task names through the generic parameter `K`. This allows you to use structured keys instead of just strings, providing better type safety and more expressive task naming.
+
+#### **Default Behavior (String Keys)**
+```python
+from sdax import AsyncTask, task_func
+
+# Standard string-based task names (backward compatible)
+processor = (
+    AsyncDagTaskProcessor[TaskContext]
+    .builder()
+    .add_task(AsyncTask(name="Database", execute=task_func(open_db)), depends_on=())
+    .add_task(AsyncTask(name="Auth", execute=task_func(check_auth)), depends_on=("Database",))
+    .build()
+)
+```
+
+#### **Custom Key Types**
+```python
+from typing import Tuple, Literal
+from sdax import AsyncTask, task_func
+
+# Define custom key types
+ServiceKey = Tuple[str, str]  # (service_name, operation)
+PriorityKey = Tuple[int, str]  # (priority_level, task_name)
+
+# Use structured keys for better organization
+processor = (
+    AsyncDagTaskProcessor[TaskContext]
+    .builder()
+    .add_task(AsyncTask(name=("database", "connect"), execute=task_func(open_db)), depends_on=())
+    .add_task(AsyncTask(name=("auth", "validate"), execute=task_func(check_auth)), depends_on=(("database", "connect"),))
+    .add_task(AsyncTask(name=(1, "high_priority"), execute=task_func(important_task)), depends_on=())
+    .build()
+)
+```
+
+#### **Level Adapter with Structured Keys**
+The level adapter uses a special `LevelKey` type internally:
+```python
+from sdax.sdax_core import LevelKey
+
+# LevelKey = Tuple[int, Literal["below"]] | Tuple[int, Literal["above"]] | str
+# This allows the level adapter to create structured level nodes:
+# - (0, "below") - entry point for level 0
+# - (0, "above") - exit point for level 0  
+# - "MyTask" - your actual task names
+```
+
+#### **Benefits of Generic Key Types**
+- **Type Safety**: Compile-time checking of key types
+- **Better Organization**: Structured keys for complex task hierarchies
+- **IDE Support**: Better autocompletion and refactoring
+- **Expressiveness**: Keys can carry semantic meaning beyond just names
+- **Backward Compatibility**: String keys continue to work unchanged
+
+#### **Key Type Constraints**
+```python
+# K must be Hashable | str
+K = TypeVar("K", bound=Hashable | str)
+
+# Valid key types:
+valid_keys = [
+    "string_key",                    # str
+    ("service", "operation"),        # Tuple[str, str] (Hashable)
+    (1, "priority"),                 # Tuple[int, str] (Hashable)
+    frozenset(["a", "b"]),           # frozenset (Hashable)
+]
+
+# Invalid key types:
+invalid_keys = [
+    ["list", "not_hashable"],        # List (not Hashable)
+    {"dict": "not_hashable"},        # Dict (not Hashable)
+    set(["set", "not_hashable"]),    # Set (not Hashable)
+]
+```
+
 ### Per-Task Configuration
 
 Each task function can have its own timeout and retry settings:
 
 ```python
+from sdax import task_func
+
 AsyncTask(
     name="FlakeyAPI",
-    execute=TaskFunction(
-        function=call_external_api,
+    execute=task_func(
+        call_external_api,
         timeout=5.0,         # 5 second timeout (use None for no timeout)
         retries=3,           # Retry 3 times
         initial_delay=1.0,   # Start retries at 1 second (default)
@@ -420,7 +621,7 @@ AsyncTask(
 Tasks can access the underlying `SdaxTaskGroup` for creating subtasks:
 
 ```python
-from sdax import SdaxTaskGroup
+from sdax import task_group_task
 
 async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
     # Create subtasks using the task group
@@ -433,11 +634,27 @@ async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
 
 AsyncTask(
     name="ParentTask",
-    execute=TaskFunction(
-        function=parent_task,
-        has_task_group_argument=True  # Enable tg parameter
-    )
+    execute=task_group_task(parent_task)  # Helper automatically enables tg parameter
 )
+```
+
+**⚠️ Important: TaskGroup Behavior**
+- **If the parent task returns early** (without awaiting subtasks), the TaskGroup will **wait for all subtasks to complete** before the parent task is considered finished
+- **This ensures proper cleanup** and prevents orphaned subtasks
+- **Subtasks run concurrently** with each other, but the parent waits for all of them
+- **If any subtask fails**, the entire TaskGroup fails (following `asyncio.TaskGroup` semantics)
+
+**Example - Early Return Still Waits:**
+```python
+async def parent_task(ctx: TaskContext, tg: SdaxTaskGroup):
+    # Create long-running subtasks
+    subtask1 = tg.create_task(asyncio.sleep(5), name="slow_task")
+    subtask2 = tg.create_task(asyncio.sleep(3), name="faster_task")
+    
+    # Return immediately - but TaskGroup waits for both subtasks!
+    return "parent_done"  # This task won't complete until both subtasks finish
+
+# The parent task will take ~5 seconds (waiting for the slowest subtask)
 ```
 
 ### Phase-by-Phase Execution
@@ -485,13 +702,13 @@ By default, tasks will retry on these exceptions:
 You can customize which exceptions trigger retries:
 
 ```python
-from sdax import RetryableException
+from sdax import RetryableException, task_func
 
 class CustomRetryableError(RetryableException):
     pass
 
-TaskFunction(
-    function=my_function,
+task_func(
+    my_function,
     retries=3,
     retryable_exceptions=(TimeoutError, CustomRetryableError)  # Custom retry logic
 )
@@ -578,7 +795,7 @@ async def close_db(ctx: RequestContext):
 
 # Safe - each execution isolated
 processor.add_task(
-    AsyncTask("DB", pre_execute=TaskFunction(open_db), post_execute=TaskFunction(close_db)),
+    AsyncTask("DB", pre_execute=task_func(open_db), post_execute=task_func(close_db)),
     level=1
 )
 ```
