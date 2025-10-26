@@ -16,7 +16,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.11"
-dependencies = ["frozendict>=2.4.6"]
+dependencies = []
 
 [project.license]
 text = "MIT"

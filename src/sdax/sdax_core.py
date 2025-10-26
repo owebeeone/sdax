@@ -14,7 +14,6 @@ from typing import (
     Any,
     Awaitable,
     Callable,
-    ClassVar,
     Dict,
     Generic,
     Hashable,
@@ -24,8 +23,6 @@ from typing import (
     Tuple,
     TypeVar,
 )
-
-from frozendict import frozendict
 
 from sdax.sdax_task_analyser import ExecutionWave, TaskAnalysis, TaskAnalyzer
 from sdax.tasks import AsyncTask, SdaxTaskGroup, TaskFunction
@@ -177,16 +174,17 @@ class PhaseContext(Generic[T, K]):
             else:
                 await self.on_task_complete(task_name)
 
-    def create_phase(self, phase_id: PhaseId) -> Phase[T, K]:
-        runner = self._phase_runner_map().get(phase_id)
-        if runner is None:
-            raise ValueError(f"Unsupported phase id {phase_id}")
-        return Phase(phase_id=phase_id, run=runner)
-
-    def _phase_runner_map(
-        self,
-    ) -> Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]:
-        return self.PHASE_MAP
+    @staticmethod
+    def create_phase(phase_id: PhaseId) -> Phase[T, K]:
+        match (phase_id):
+            case PhaseId.PRE_EXEC:
+                return Phase(phase_id=phase_id, run=PhaseContext._run_pre_phase)
+            case PhaseId.EXECUTE:
+                return Phase(phase_id=phase_id, run=PhaseContext._run_execute_phase)
+            case PhaseId.POST_EXEC:
+                return Phase(phase_id=phase_id, run=PhaseContext._run_post_phase)
+            case _:
+                raise ValueError(f"Unsupported phase id {phase_id}")
 
     async def _run_pre_phase(self) -> PhaseId | None:
         pre_waves = self.analysis.pre_execute_graph.waves
@@ -413,13 +411,6 @@ class PhaseContext(Generic[T, K]):
                     queue.append(dependent)
         return order
 
-    PHASE_MAP: ClassVar[Dict[PhaseId, Callable[["PhaseContext[T]"], Awaitable[PhaseId | None]]]] = (
-        frozendict({
-            PhaseId.PRE_EXEC: _run_pre_phase,
-            PhaseId.EXECUTE: _run_execute_phase,
-            PhaseId.POST_EXEC: _run_post_phase,
-        })
-    )
 
 
 class AsyncTaskProcessorBuilder(Generic[T, K], ABC):
