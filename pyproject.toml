@@ -1,6 +1,6 @@
 [project]
 name = "sdax"
-version = "0.6.1"
+version = "0.7.0"
 description = "A lightweight, high-performance, in-process micro-orchestrator for structured, declarative, and parallel asynchronous tasks in Python."
 authors = [
     { name = "Gianni Mariani", email = "gianni@mariani.ws" },

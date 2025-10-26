@@ -15,7 +15,7 @@ from .sdax_core import (
 )
 from .tasks import AsyncTask, RetryableException, SdaxTaskGroup, TaskFunction, task_func, task_group_task, task_sync_func
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 __all__ = [
     "AsyncTask",
