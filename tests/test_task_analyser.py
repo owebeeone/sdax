@@ -3,7 +3,7 @@
 Tests complex dependency graphs to validate wave construction assumptions.
 """
 
-from typing import Any
+from typing import Any, Hashable
 
 import pytest
 
@@ -18,7 +18,7 @@ async def dummy_func(ctx: Any):
 
 
 def make_task(
-    name: str,
+    name: Hashable,
     has_pre: bool = False,
     has_exec: bool = False,
     has_post: bool = False,
@@ -115,9 +115,9 @@ def format_wave_structure(graph) -> str:
     """
     lines = []
     for wave in graph.waves:
-        deps = wave.depends_on_tasks
+        deps = tuple(str(dep) for dep in wave.depends_on_tasks)
         deps_str = f"depends_on_tasks={deps}" if deps else "no deps"
-        tasks_str = ", ".join(wave.tasks)
+        tasks_str = ", ".join(str(task) for task in wave.tasks)
         lines.append(f"Wave {wave.wave_num}: [{tasks_str}] ({deps_str})")
     return "\n".join(lines)
 
@@ -162,6 +162,36 @@ class TestBasicGraphs:
         assert post_wave_c is not None and post_wave_c.tasks == ("C",)
         assert post_wave_b is not None and post_wave_b.tasks == ("B",)
         assert post_wave_a is not None and post_wave_a.tasks == ("A",)
+
+    def test_integer_identifier_chain(self):
+        """1 -> 2 -> 3: Same chain but using integer task identifiers."""
+        analyzer = TaskAnalyzer[Any, int]()
+        analyzer.add_task(make_task(1, has_pre=True, has_post=True), depends_on=())
+        analyzer.add_task(make_task(2, has_pre=True, has_post=True), depends_on=(1,))
+        analyzer.add_task(make_task(3, has_pre=True, has_post=True), depends_on=(2,))
+
+        analysis = analyzer.analyze()
+
+        wave1 = analysis.pre_wave_containing(1)
+        wave2 = analysis.pre_wave_containing(2)
+        wave3 = analysis.pre_wave_containing(3)
+
+        assert wave1 is not None and wave1.tasks == (1,)
+        assert wave1.depends_on_tasks == ()
+
+        assert wave2 is not None and wave2.tasks == (2,)
+        assert set(wave2.depends_on_tasks) == {1}
+
+        assert wave3 is not None and wave3.tasks == (3,)
+        assert set(wave3.depends_on_tasks) == {2}
+
+        post_wave1 = analysis.post_wave_containing(1)
+        post_wave2 = analysis.post_wave_containing(2)
+        post_wave3 = analysis.post_wave_containing(3)
+
+        assert post_wave3 is not None and post_wave3.tasks == (3,)
+        assert post_wave2 is not None and set(post_wave2.depends_on_tasks) == {3}
+        assert post_wave1 is not None and set(post_wave1.depends_on_tasks) == {2}
 
     def test_independent_chains(self):
         """A -> B  and  C -> D: Two independent chains.

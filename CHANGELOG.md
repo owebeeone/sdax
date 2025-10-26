@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.1] - 2024-12-19
+## [0.6.1] - 2025-10-25
 
 ### Added
 - **Phase-by-Phase Execution API**: New advanced execution model for fine-grained control over task phases
@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New phased execution API is completely optional
 - All other existing APIs remain fully compatible
 
-## [0.5.2] - 2024-12-19
+## [0.5.2] - 2025-10-24
 
 ### Added
 - Comprehensive test suite with 62 tests covering all major functionality
@@ -61,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Minimal overhead: ~7μs per task
 - Optimized for I/O-bound workflows
 
-## [0.5.1] - 2024-12-19
+## [0.5.1] - 2025-10-22
 
 ### Added
 - Initial public release
@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resource cleanup guarantees
 - Type-safe context passing
 
-## [0.5.0] - 2024-12-19
+## [0.5.0] - 2025-10-22
 
 ### Added
 - Initial development release

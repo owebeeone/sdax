@@ -18,6 +18,7 @@ from typing import (
     Generic,
     Hashable,
     List,
+    Literal,
     Mapping,
     Sequence,
     Tuple,
@@ -627,32 +628,39 @@ class AsyncDagTaskProcessor(Generic[T, K]):
         return AsyncPhaseRunner[T, K](self, ctx)
 
 
+LevelKey = Tuple[int, Literal["below"]] | Tuple[int, Literal["above"]] | str
+
+
 @dataclass
-class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, str]):
+class AsyncDagLevelAdapterBuilder(AsyncTaskProcessorBuilder[T, LevelKey]):
     """Level-compatible builder that adapts to DAG by inserting level nodes.
 
     API matches AsyncTaskProcessorBuilder: add_task(task, level) -> self;
     build() -> AsyncDagTaskProcessor.
     """
 
-    _levels: Dict[int, List[AsyncTask[T, str]]] = field(default_factory=lambda: defaultdict(list))
+    _levels: Dict[int, List[AsyncTask[T, LevelKey]]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
-    def add_task(self, task: AsyncTask[T, str], level: int) -> "AsyncDagLevelAdapterBuilder[T]":
+    def add_task(
+        self, task: AsyncTask[T, LevelKey], level: int
+    ) -> "AsyncDagLevelAdapterBuilder[T]":
         self._levels[level].append(task)
         return self
 
-    def build(self) -> AsyncDagTaskProcessor[T, str]:
-        builder = AsyncDagTaskProcessor[T, str].builder()
+    def build(self) -> AsyncDagTaskProcessor[T, LevelKey]:
+        builder = AsyncDagTaskProcessor[T, LevelKey].builder()
         if not self._levels:
             return builder.build()
 
         sorted_levels = sorted(self._levels.keys())
 
-        def below_name(lvl: int) -> str:
-            return f"__level_{lvl}_below__"
+        def below_name(lvl: int) -> LevelKey:
+            return (lvl, "below")
 
-        def above_name(lvl: int) -> str:
-            return f"__level_{lvl}_above__"
+        def above_name(lvl: int) -> LevelKey:
+            return (lvl, "above")
 
         # Create level nodes and tasks with appropriate dependencies
         prev_level: int | None = None
