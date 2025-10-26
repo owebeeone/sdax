@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2025-10-27
+
+### Added
+- **Task Creation Helper**: Added `task()` function for creating AsyncTask instances
+  - Simplified syntax for creating tasks with name and phase functions
+  - More ergonomic than direct AsyncTask instantiation
+  - Validates that at least one phase function is provided
+  - **Usage Example**:
+    ```python
+    from sdax import task, task_func
+    
+    # Simple task creation
+    my_task = task("MyTask", execute=task_func(my_function))
+    
+    # Task with multiple phases
+    my_task = task("SetupAndCleanup", 
+                   pre_execute=task_func(setup),
+                   post_execute=task_func(cleanup))
+    ```
+- **Join Node Helper**: Added `join()` function for creating empty graph synchronization points
+  - Creates empty graph nodes that act as synchronization points in task dependencies
+  - More idiomatic than creating empty AsyncTask instances
+  - Useful for coordinating multiple parallel tasks before downstream processing
+  - **Usage Example**:
+    ```python
+    from sdax import join
+    
+    # Create a synchronization point that waits for TaskA and TaskB
+    .add_task(join("SyncPoint"), depends_on=("TaskA", "TaskB"))
+    
+    # Multiple tasks can depend on the join node
+    .add_task(AsyncTask("Process"), depends_on=("SyncPoint",))
+    .add_task(AsyncTask("Notify"), depends_on=("SyncPoint",))
+    ```
+
+
 ### Added
 - **Task Creation Helper**: Added `task()` function for creating AsyncTask instances
   - Simplified syntax for creating tasks with name and phase functions
